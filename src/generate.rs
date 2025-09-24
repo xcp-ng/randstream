@@ -19,6 +19,9 @@ pub struct GenerateArgs {
     pub file: Option<PathBuf>,
 
     /// The stream size
+    ///
+    /// Defaults to the provide file size if it exists, generates an infinite
+    /// stream otherwise
     #[clap(short, long)]
     pub size: Option<String>,
 
@@ -32,7 +35,9 @@ pub struct GenerateArgs {
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let stream_size = if let Some(size) = &args.size {
         Some(parse_size(size)?)
-    } else if let Some(file) = &args.file {
+    } else if let Some(file) = &args.file
+        && file.exists()
+    {
         Some(read_file_size(file)?)
     } else {
         None
