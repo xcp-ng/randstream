@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
 use itertools::Itertools as _;
@@ -18,6 +19,12 @@ pub struct ValidateArgs {
     #[arg()]
     pub file: Option<PathBuf>,
 
+    /// The expected checksum
+    ///
+    /// Generates an error if it doesn't match the stream checksum
+    #[clap(short, long)]
+    pub expected_checksum: Option<String>,
+
     /// The stream size
     ///
     /// Defaults to the provided file size
@@ -36,7 +43,7 @@ pub struct ValidateArgs {
 }
 
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
-    if let Some(file) = &args.file {
+    let checksum = if let Some(file) = &args.file {
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
         let file_len: u64 =
             if let Some(size) = &args.size { parse_size(size)? } else { file.metadata()?.len() };
@@ -73,9 +80,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
             hasher.combine(partial_hasher)
         }
 
-        println!("{:x}", hasher.finalize());
-
-        Ok(0)
+        hasher.finalize()
     } else {
         let chunk_size = parse_size(&args.chunk_size)? as usize;
         let mut buffer = vec![0; chunk_size];
@@ -89,8 +94,15 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
             hasher.update(&buffer[..bytes_read]);
         }
 
-        println!("{:x}", hasher.finalize());
-
-        Ok(0)
+        hasher.finalize()
+    };
+    if let Some(expected_checksum) = &args.expected_checksum
+        && expected_checksum != &format!("{checksum:x}")
+    {
+        return Err(anyhow!(
+            "Checksum mismatch. It was expected to be {expected_checksum}, but is actually {checksum:x}"
+        ));
     }
+    println!("{checksum:x}");
+    Ok(0)
 }
