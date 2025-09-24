@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
 use itertools::Itertools as _;
+use log::debug;
 use parse_size::parse_size;
 use std::fs::File;
 use std::io::{self, Read, Seek};
@@ -50,6 +51,9 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         let file_len: u64 =
             if let Some(size) = &args.size { parse_size(size)? } else { read_file_size(file)? };
         let chunk_size = parse_size(&args.chunk_size)? as usize;
+        debug!("number of threads: {num_threads}");
+        debug!("file size: {file_len}");
+        debug!("chunk size: {chunk_size}");
 
         let num_chunks = (file_len as f64 / chunk_size as f64).ceil() as usize;
         let chunks_per_thread = (num_chunks as f64 / num_threads as f64).ceil() as usize;

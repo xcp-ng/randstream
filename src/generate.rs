@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
+use log::debug;
 use parse_size::parse_size;
 use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
@@ -31,6 +32,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     } else {
         return Err(anyhow!("A file or a size is required"));
     };
+    debug!("stream size: {total_size_to_generate}");
     let mut writer: Box<dyn Write> = if let Some(path) = &args.file {
         Box::new(File::create(path)?)
     } else {
