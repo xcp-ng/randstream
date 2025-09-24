@@ -8,6 +8,8 @@ use std::io::{self, Read, Seek};
 use std::path::PathBuf;
 use std::thread;
 
+use crate::read_file_size;
+
 /// Validate a random stream
 ///
 /// If the input is a regular file or a block device, the data will be read
@@ -46,7 +48,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     let checksum = if let Some(file) = &args.file {
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
         let file_len: u64 =
-            if let Some(size) = &args.size { parse_size(size)? } else { file.metadata()?.len() };
+            if let Some(size) = &args.size { parse_size(size)? } else { read_file_size(file)? };
         let chunk_size = parse_size(&args.chunk_size)? as usize;
 
         let num_chunks = (file_len as f64 / chunk_size as f64).ceil() as usize;

@@ -8,6 +8,8 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use crate::read_file_size;
+
 /// Generate a random stream
 #[derive(Args, Debug)]
 #[command(alias = "write")]
@@ -25,8 +27,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let total_size_to_generate: u64 = if let Some(size) = &args.size {
         parse_size(size)?
     } else if let Some(file) = &args.file {
-        // TODO: properly read the size on a block device
-        file.metadata()?.len()
+        read_file_size(file)?
     } else {
         return Err(anyhow!("A file or a size is required"));
     };
