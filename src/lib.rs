@@ -1,4 +1,5 @@
-use std::{os::unix::fs::FileTypeExt, path::Path};
+use std::io;
+use std::{io::Read, os::unix::fs::FileTypeExt, path::Path};
 
 extern crate log;
 
@@ -20,4 +21,16 @@ pub fn read_file_size(file: &Path) -> anyhow::Result<u64> {
     } else {
         Ok(file.metadata()?.len())
     }
+}
+
+fn read_exact_or_eof(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut bytes_read = 0;
+    while bytes_read < buffer.len() {
+        let n = reader.read(&mut buffer[bytes_read..])?;
+        if n == 0 {
+            break;
+        }
+        bytes_read += n;
+    }
+    Ok(bytes_read)
 }

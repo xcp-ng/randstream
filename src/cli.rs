@@ -3,7 +3,11 @@ use clap_verbosity_flag::{InfoLevel, Verbosity};
 
 use crate::{generate::GenerateArgs, validate::ValidateArgs};
 
-/// A simple tool to generate a random stream and validate it
+/// This utility creates and validate a random stream of data with built-in validation.
+///
+/// By including a checksum within each data chunk, it enables independent
+/// validation and simplifies the process of locating errors within a specific
+/// segment of the stream.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None, arg_required_else_help = true)]
 pub struct Cli {

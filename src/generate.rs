@@ -30,9 +30,14 @@ pub struct GenerateArgs {
     /// An hexidecimal notation is expected. The size can't exceed 32 bytes
     #[clap(short = 'S', long)]
     pub seed: Option<String>,
+
+    /// The chunk size
+    #[clap(short, long, default_value = "32ki")]
+    pub chunk_size: String,
 }
 
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
+    let chunk_size = parse_size(&args.chunk_size)? as usize;
     let stream_size = if let Some(size) = &args.size {
         Some(parse_size(size)?)
     } else if let Some(file) = &args.file
@@ -61,24 +66,36 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     }
     debug!("seed: {}", hex::encode(seed));
     let mut rng = SmallRng::from_seed(seed);
-    let mut hasher = Hasher::new();
-    let mut buffer = [0u8; 65536];
+    let mut buffer = vec![0u8; chunk_size];
     let mut bytes_generated: u64 = 0;
 
     if let Some(stream_size) = stream_size {
         while bytes_generated < stream_size {
             let remaining_bytes = stream_size - bytes_generated;
-            let bytes_to_generate = remaining_bytes.min(buffer.len() as u64) as usize;
-            rng.fill_bytes(&mut buffer[..bytes_to_generate]);
+            let bytes_to_generate = remaining_bytes.min(chunk_size as u64) as usize;
+            if bytes_to_generate >= 4 {
+                rng.fill_bytes(&mut buffer[..bytes_to_generate - 4]);
+                let mut hasher = Hasher::new();
+                hasher.update(&buffer[..bytes_to_generate - 4]);
+                let checksum_bytes = hasher.finalize().to_le_bytes();
+                let end_slice = &mut buffer[bytes_to_generate - 4..bytes_to_generate];
+                end_slice.copy_from_slice(&checksum_bytes);
+            } else {
+                // not enough room to fit the checksum, just push some zeros in there
+                buffer[..bytes_to_generate].fill(0);
+            }
             writer.write_all(&buffer[..bytes_to_generate])?;
-            hasher.update(&buffer[..bytes_to_generate]);
             bytes_generated += bytes_to_generate as u64;
         }
     } else {
         loop {
             rng.fill_bytes(&mut buffer);
+            let mut hasher = Hasher::new();
+            hasher.update(&buffer[..chunk_size - 4]);
+            let checksum_bytes = hasher.finalize().to_le_bytes();
+            let end_slice = &mut buffer[chunk_size - 4..chunk_size];
+            end_slice.copy_from_slice(&checksum_bytes);
             if let Ok(write_size) = writer.write(&buffer) {
-                hasher.update(&buffer[..write_size]);
                 bytes_generated += write_size as u64;
             } else {
                 break;
@@ -86,7 +103,6 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         }
     }
     debug!("written bytes: {bytes_generated}");
-    eprintln!("{:08x}", hasher.finalize());
 
     Ok(0)
 }
