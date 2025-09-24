@@ -21,6 +21,12 @@ pub struct GenerateArgs {
     /// The stream size
     #[clap(short, long)]
     pub size: Option<String>,
+
+    /// The random generator seed
+    ///
+    /// An hexidecimal notation is expected. The size can't exceed 32 bytes
+    #[clap(short = 'S', long)]
+    pub seed: Option<String>,
 }
 
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
@@ -44,7 +50,11 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         Box::new(io::stdout())
     };
 
-    let seed = [0u8; 32];
+    let mut seed = [0u8; 32];
+    if let Some(seed_hex) = &args.seed {
+        hex::decode_to_slice(format!("{:0>64}", seed_hex), &mut seed)?;
+    }
+    debug!("seed: {}", hex::encode(seed));
     let mut rng = SmallRng::from_seed(seed);
     let mut hasher = Hasher::new();
     let mut buffer = [0u8; 65536];
