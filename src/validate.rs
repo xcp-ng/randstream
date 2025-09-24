@@ -46,13 +46,13 @@ pub struct ValidateArgs {
 }
 
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
+    let chunk_size = parse_size(&args.chunk_size)? as usize;
     let checksum = if let Some(file) = &args.file {
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
         let file_len: u64 =
             if let Some(size) = &args.size { parse_size(size)? } else { read_file_size(file)? };
-        let chunk_size = parse_size(&args.chunk_size)? as usize;
+        debug!("read size: {file_len}");
         debug!("number of threads: {num_threads}");
-        debug!("file size: {file_len}");
         debug!("chunk size: {chunk_size}");
 
         let num_chunks = (file_len as f64 / chunk_size as f64).ceil() as usize;
@@ -88,9 +88,12 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
 
         hasher.finalize()
     } else {
-        let chunk_size = parse_size(&args.chunk_size)? as usize;
+        debug!("read size: ∞");
+        debug!("number of threads: 1");
+        debug!("chunk size: {chunk_size}");
         let mut buffer = vec![0; chunk_size];
         let mut hasher = Hasher::new();
+        let mut stream_size: u64 = 0;
         loop {
             let bytes_read = io::stdin().read(&mut buffer)?;
             if bytes_read == 0 {
@@ -98,8 +101,9 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                 break;
             }
             hasher.update(&buffer[..bytes_read]);
+            stream_size += bytes_read as u64;
         }
-
+        debug!("read bytes: {stream_size}");
         hasher.finalize()
     };
     if let Some(expected_checksum) = &args.expected_checksum
