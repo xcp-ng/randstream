@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
 use log::debug;
@@ -25,14 +24,20 @@ pub struct GenerateArgs {
 }
 
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
-    let total_size_to_generate: u64 = if let Some(size) = &args.size {
-        parse_size(size)?
+    let stream_size = if let Some(size) = &args.size {
+        Some(parse_size(size)?)
     } else if let Some(file) = &args.file {
-        read_file_size(file)?
+        Some(read_file_size(file)?)
     } else {
-        return Err(anyhow!("A file or a size is required"));
+        None
     };
-    debug!("stream size: {total_size_to_generate}");
+    debug!(
+        "write size: {}",
+        match stream_size {
+            Some(size) => size.to_string(),
+            None => "∞".to_string(),
+        }
+    );
     let mut writer: Box<dyn Write> = if let Some(path) = &args.file {
         Box::new(File::create(path)?)
     } else {
@@ -45,20 +50,27 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let mut buffer = [0u8; 65536];
     let mut bytes_generated: u64 = 0;
 
-    while bytes_generated < total_size_to_generate {
-        let remaining_bytes = total_size_to_generate - bytes_generated;
-        let bytes_to_generate = remaining_bytes.min(buffer.len() as u64) as usize;
-
-        rng.fill_bytes(&mut buffer[..bytes_to_generate]);
-        hasher.update(&buffer[..bytes_to_generate]);
-
-        if writer.write_all(&buffer[..bytes_to_generate]).is_err() {
-            break;
+    if let Some(stream_size) = stream_size {
+        while bytes_generated < stream_size {
+            let remaining_bytes = stream_size - bytes_generated;
+            let bytes_to_generate = remaining_bytes.min(buffer.len() as u64) as usize;
+            rng.fill_bytes(&mut buffer[..bytes_to_generate]);
+            writer.write_all(&buffer[..bytes_to_generate])?;
+            hasher.update(&buffer[..bytes_to_generate]);
+            bytes_generated += bytes_to_generate as u64;
         }
-
-        bytes_generated += bytes_to_generate as u64;
+    } else {
+        loop {
+            rng.fill_bytes(&mut buffer);
+            if let Ok(write_size) = writer.write(&buffer) {
+                hasher.update(&buffer[..write_size]);
+                bytes_generated += write_size as u64;
+            } else {
+                break;
+            }
+        }
     }
-
+    debug!("written bytes: {bytes_generated}");
     eprintln!("{:x}", hasher.finalize());
 
     Ok(0)
