@@ -71,7 +71,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         }
     }
     debug!("written bytes: {bytes_generated}");
-    eprintln!("{:x}", hasher.finalize());
+    eprintln!("{:08x}", hasher.finalize());
 
     Ok(0)
 }

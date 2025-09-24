@@ -107,12 +107,12 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         hasher.finalize()
     };
     if let Some(expected_checksum) = &args.expected_checksum
-        && expected_checksum != &format!("{checksum:x}")
+        && expected_checksum != &format!("{checksum:08x}")
     {
         return Err(anyhow!(
             "Checksum mismatch. It was expected to be {expected_checksum}, but is actually {checksum:x}"
         ));
     }
-    println!("{checksum:x}");
+    println!("{checksum:08x}");
     Ok(0)
 }
