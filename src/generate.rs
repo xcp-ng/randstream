@@ -10,6 +10,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Seek as _, Write};
 use std::path::PathBuf;
 use std::thread;
+use std::time::Instant;
 
 use crate::read_file_size;
 
@@ -46,6 +47,7 @@ pub struct GenerateArgs {
 }
 
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
+    let start = Instant::now();
     let chunk_size = parse_size(&args.chunk_size)? as usize;
     // we need to write a multiple a 64 bits to be able to use advance()
     let buffer_size = chunk_size.div_ceil(8) * 8;
@@ -114,7 +116,12 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         }
     };
     debug!("written bytes: {bytes_generated}");
-
+    debug!(
+        "throughput: {:.2?}GBi/s",
+        (bytes_generated / (1024 * 1024 * 1024)) as f32 / start.elapsed().as_micros() as f32
+            * 1000000.0
+    );
+    debug!("run in {:.2?}", start.elapsed());
     Ok(0)
 }
 

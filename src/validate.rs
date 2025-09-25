@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::{self, Seek};
 use std::path::PathBuf;
 use std::thread;
+use std::time::Instant;
 
 use crate::{read_exact_or_eof, read_file_size};
 
@@ -40,8 +41,9 @@ pub struct ValidateArgs {
 }
 
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
+    let start = Instant::now();
     let chunk_size = parse_size(&args.chunk_size)? as usize;
-    if let Some(file) = &args.file {
+    let bytes_validated = if let Some(file) = &args.file {
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
         let file_len: u64 =
             if let Some(size) = &args.size { parse_size(size)? } else { read_file_size(file)? };
@@ -72,7 +74,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
             })
             .collect();
         let read_bytes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
-        debug!("read bytes: {}", read_bytes.iter().sum::<u64>());
+        read_bytes.iter().sum()
     } else {
         debug!("read size: ∞");
         debug!("number of threads: 1");
@@ -90,8 +92,15 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
             stream_size += read_size as u64;
             chunk += 1;
         }
-        debug!("read bytes: {stream_size}");
+        stream_size
     };
+    debug!("read bytes: {bytes_validated}");
+    debug!(
+        "throughput: {:.2?}GBi/s",
+        (bytes_validated / (1024 * 1024 * 1024)) as f32 / start.elapsed().as_micros() as f32
+            * 1000000.0
+    );
+    debug!("run in {:.2?}", start.elapsed());
     Ok(0)
 }
 
