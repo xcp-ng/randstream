@@ -1,5 +1,8 @@
 use std::io;
+use std::sync::mpsc::{Receiver, Sender};
 use std::{io::Read, os::unix::fs::FileTypeExt, path::Path};
+
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 extern crate log;
 
@@ -33,4 +36,29 @@ fn read_exact_or_eof(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<us
         bytes_read += n;
     }
     Ok(bytes_read)
+}
+
+fn set_up_progress_bar(stream_size: Option<u64>) -> anyhow::Result<ProgressBar> {
+    let pb = ProgressBar::with_draw_target(stream_size, ProgressDrawTarget::stderr_with_hz(5));
+    pb.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
+        )?
+        .progress_chars("=> "),
+    );
+    Ok(pb)
+}
+
+fn receive_progress(pb: &Option<ProgressBar>, rx: &Receiver<u64>, tx: Sender<u64>) {
+    drop(tx);
+    let mut total_bytes = 0;
+    if let Some(pb) = pb {
+        while let Ok(bytes) = rx.recv() {
+            total_bytes += bytes;
+            pb.set_position(total_bytes);
+        }
+        pb.finish_and_clear();
+    } else {
+        while rx.recv().is_ok() {}
+    }
 }

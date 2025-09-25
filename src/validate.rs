@@ -7,10 +7,11 @@ use parse_size::parse_size;
 use std::fs::File;
 use std::io::{self, Seek};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
-use crate::{read_exact_or_eof, read_file_size};
+use crate::{read_exact_or_eof, read_file_size, receive_progress, set_up_progress_bar};
 
 /// Validate a random stream
 ///
@@ -38,6 +39,10 @@ pub struct ValidateArgs {
     /// The chunk size
     #[clap(short, long, default_value = "32ki")]
     pub chunk_size: String,
+
+    /// Hide the progress bar
+    #[clap(short, long)]
+    pub no_progress: bool,
 }
 
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
@@ -47,6 +52,8 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
         let file_len: u64 =
             if let Some(size) = &args.size { parse_size(size)? } else { read_file_size(file)? };
+        let pb = (!args.no_progress).then_some(set_up_progress_bar(Some(file_len))).transpose()?;
+
         debug!("read size: {file_len}");
         debug!("number of threads: {num_threads}");
         debug!("chunk size: {chunk_size}");
@@ -54,9 +61,12 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         let num_chunks = (file_len as f64 / chunk_size as f64).ceil() as u64;
         let chunks_per_thread = (num_chunks as f64 / num_threads as f64).ceil() as u64;
 
+        let (tx, rx) = mpsc::channel::<u64>();
+
         let handles: Vec<_> = (0..num_threads as u64)
             .map(|i| {
                 let file = file.clone();
+                let tx = tx.clone();
                 thread::spawn(move || -> anyhow::Result<u64> {
                     let mut file = File::open(file)?;
                     let start_chunk = i * chunks_per_thread;
@@ -68,11 +78,13 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                         let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
                         validate_chunk(chunk, &buffer[..read_size])?;
                         total_read_size += read_size as u64;
+                        tx.send(read_size as u64)?;
                     }
                     Ok(total_read_size)
                 })
             })
             .collect();
+        receive_progress(&pb, &rx, tx);
         let read_bytes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
         read_bytes.iter().sum()
     } else {
@@ -82,6 +94,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         let mut buffer = vec![0; chunk_size];
         let mut stream_size: u64 = 0;
         let mut chunk: u64 = 0;
+        let pb = (!args.no_progress).then_some(set_up_progress_bar(None)).transpose()?;
         loop {
             let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
             if read_size == 0 {
@@ -91,6 +104,9 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
             validate_chunk(chunk, &buffer[..read_size])?;
             stream_size += read_size as u64;
             chunk += 1;
+            if let Some(pb) = &pb {
+                pb.set_position(stream_size);
+            }
         }
         stream_size
     };

@@ -9,10 +9,11 @@ use rand_pcg::Pcg64Mcg;
 use std::fs::OpenOptions;
 use std::io::{self, Seek as _, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
-use crate::read_file_size;
+use crate::{read_file_size, receive_progress, set_up_progress_bar};
 
 /// Generate a random stream
 #[derive(Args, Debug)]
@@ -44,6 +45,10 @@ pub struct GenerateArgs {
     /// The chunk size
     #[clap(short, long, default_value = "32ki")]
     pub chunk_size: String,
+
+    /// Hide the progress bar
+    #[clap(short, long)]
+    pub no_progress: bool,
 }
 
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
@@ -70,6 +75,8 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     debug!("seed: {}", hex::encode(seed));
     let mut bytes_generated: u64 = 0;
 
+    let pb = (!args.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
+
     if let Some(file) = &args.file {
         {
             // make sure the output file exists, before opening it in the threads
@@ -83,9 +90,11 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         debug!("number of threads: {num_threads}");
         let num_chunks = (stream_size as f64 / chunk_size as f64).ceil() as u64;
         let chunks_per_thread = (num_chunks as f64 / num_threads as f64).ceil() as u64;
+        let (tx, rx) = mpsc::channel::<u64>();
         let handles: Vec<_> = (0..num_threads as u64)
             .map(|i| {
                 let file = file.clone();
+                let tx = tx.clone();
                 thread::spawn(move || -> anyhow::Result<u64> {
                     let mut writer = OpenOptions::new().write(true).open(file)?;
                     let mut rng = Pcg64Mcg::from_seed(seed);
@@ -101,11 +110,13 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
                         generate_chunk(&mut rng, &mut buffer, bytes_to_generate);
                         writer.write_all(&buffer[..bytes_to_generate])?;
                         total_write_size += bytes_to_generate as u64;
+                        tx.send(bytes_to_generate as u64)?;
                     }
                     Ok(total_write_size)
                 })
             })
             .collect();
+        receive_progress(&pb, &rx, tx);
         let written_bytes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
         bytes_generated = written_bytes.iter().sum();
     } else {
@@ -119,6 +130,9 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
             generate_chunk(&mut rng, &mut buffer, bytes_to_generate);
             writer.write_all(&buffer[..bytes_to_generate])?;
             bytes_generated += bytes_to_generate as u64;
+            if let Some(pb) = &pb {
+                pb.set_position(bytes_generated);
+            }
         }
     };
     debug!("written bytes: {bytes_generated}");
