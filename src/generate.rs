@@ -71,8 +71,14 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let mut bytes_generated: u64 = 0;
 
     if let Some(file) = &args.file {
-        // make sure the output file exists, before opening it in the threads
-        OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
+        {
+            // make sure the output file exists, before opening it in the threads
+            let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
+            // and that the file size matches the requested size
+            if file.is_file() {
+                f.set_len(stream_size)?;
+            }
+        }
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
         debug!("number of threads: {num_threads}");
         let num_chunks = (stream_size as f64 / chunk_size as f64).ceil() as u64;
