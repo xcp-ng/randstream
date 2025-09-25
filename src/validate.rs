@@ -74,11 +74,16 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                     let mut buffer = vec![0; chunk_size];
                     file.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
                     let mut total_read_size: u64 = 0;
+                    let mut progress_bytes: u64 = 0;
                     for chunk in start_chunk..end_chunk {
                         let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
                         validate_chunk(chunk, &buffer[..read_size])?;
                         total_read_size += read_size as u64;
-                        tx.send(read_size as u64)?;
+                        progress_bytes += read_size as u64;
+                        if chunk % 100 == 0 {
+                            tx.send(progress_bytes)?;
+                            progress_bytes = 0;
+                        }
                     }
                     Ok(total_read_size)
                 })

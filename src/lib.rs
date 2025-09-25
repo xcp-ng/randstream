@@ -39,7 +39,7 @@ fn read_exact_or_eof(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<us
 }
 
 fn set_up_progress_bar(stream_size: Option<u64>) -> anyhow::Result<ProgressBar> {
-    let pb = ProgressBar::with_draw_target(stream_size, ProgressDrawTarget::stderr_with_hz(5));
+    let pb = ProgressBar::with_draw_target(stream_size, ProgressDrawTarget::stderr_with_hz(10));
     pb.set_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",

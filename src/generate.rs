@@ -104,13 +104,18 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
                     writer.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
                     rng.advance(((start_chunk * buffer_size as u64) / 8).into());
                     let mut total_write_size: u64 = 0;
+                    let mut progress_bytes: u64 = 0;
                     for chunk in start_chunk..end_chunk {
                         let bytes_to_generate =
                             ((stream_size - (chunk * chunk_size as u64)) as usize).min(chunk_size);
                         generate_chunk(&mut rng, &mut buffer, bytes_to_generate);
                         writer.write_all(&buffer[..bytes_to_generate])?;
                         total_write_size += bytes_to_generate as u64;
-                        tx.send(bytes_to_generate as u64)?;
+                        progress_bytes += bytes_to_generate as u64;
+                        if chunk % 100 == 0 {
+                            tx.send(progress_bytes)?;
+                            progress_bytes = 0;
+                        }
                     }
                     Ok(total_write_size)
                 })
