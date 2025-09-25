@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+  schedule:
+    - cron: '20 7 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # rust channels
+          - build: stable
+            os: ubuntu-24.04
+            rust: stable
+            target: x86_64-unknown-linux-gnu
+          - build: beta
+            os: ubuntu-24.04
+            rust: beta
+            target: x86_64-unknown-linux-gnu
+          - build: nightly
+            os: ubuntu-24.04
+            rust: nightly
+            target: x86_64-unknown-linux-gnu
+
+          # release platforms
+          - build: linux-amd64
+            os: ubuntu-24.04
+            rust: stable
+            target: x86_64-unknown-linux-musl
+          # - build: linux-arm64
+          #   os: ubuntu-24.04-arm
+          #   rust: stable
+          #   target: aarch64-unknown-linux-musl
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+      with:
+        toolchain: ${{ matrix.rust }}
+        target: ${{ matrix.target }}
+    - run: cargo build --workspace --target ${{ matrix.target }} --release
+    - run: cargo run --target ${{ matrix.target }} --release -- --help
+    - run: cargo test --workspace --target ${{ matrix.target }} --release
+      env:
+        NO_COLOR: "true"
+
+  rustfmt:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+      with:
+        toolchain: stable
+        components: rustfmt
+    - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+      with:
+        toolchain: stable
+        components: clippy
+    - run: cargo clippy --all-targets -- -D warnings
+
+  dependabot-auto-merge:
+    needs:
+      - test
+      - rustfmt
+      - clippy
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-24.04
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && github.event_name == 'pull_request' }}
+    steps:
+    - run: gh pr merge --auto --rebase "$PR_URL"
+      env:
+        PR_URL: ${{github.event.pull_request.html_url}}
+        GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}

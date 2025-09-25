@@ -1,0 +1,108 @@
+name: release
+
+# Only do the release on x.y.z tags.
+on:
+  push:
+    tags:
+    - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions: {}
+
+jobs:
+  # The create-release job runs purely to initialize the GitHub release itself,
+  # and names the release after the `x.y.z` tag that was pushed. It's separate
+  # from building the release so that we only create the release once.
+  create-release:
+    name: create-release
+    runs-on: ubuntu-latest
+    # We need this to be able to create releases.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Get the release version from the tag
+        if: env.VERSION == ''
+        run: echo "VERSION=$REFNAME" >> $GITHUB_ENV
+        env:
+          REFNAME: ${{ github.ref_name }}
+      - name: Check that tag version and Cargo.toml version are the same
+        shell: bash
+        run: |
+          if ! grep -q "version = \"$VERSION\"" Cargo.toml; then
+            echo "version does not match Cargo.toml" >&2
+            exit 1
+          fi
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create $VERSION --draft --verify-tag --title $VERSION
+    outputs:
+      version: ${{ env.VERSION }}
+
+  build-release:
+    name: build-release
+    needs: ['create-release']
+    runs-on: ${{ matrix.os }}
+    # We need this to upload the artifacts
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build: linux-amd64
+            os: ubuntu-latest
+            rust: stable
+            target: x86_64-unknown-linux-musl
+          # - build: linux-arm64
+          #   os: ubuntu-latest
+          #   rust: stable
+          #   target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          cargo build --workspace --target ${{ matrix.target }} --release
+          echo "BIN=$PWD/target/${{ matrix.target }}/release/randstream" >> $GITHUB_ENV
+
+      - name: Get the release version from the tag
+        run: echo "VERSION=$VERSION" >> $GITHUB_ENV
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
+
+      - name: Determine archive name
+        shell: bash
+        run: |
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "ARCHIVE=randstream-$VERSION-${{ matrix.target }}" >> $GITHUB_ENV
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
+
+      - name: Build archive
+        shell: bash
+        run: |
+          mkdir archive
+          cd archive
+          cp $BIN .
+          cp ../README.md ../LICENSE .
+          tar czf "../$ARCHIVE.tar.gz" .
+          cd ..
+          shasum -a 256 "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
+          echo "ASSET=$ARCHIVE.tar.gz" >> $GITHUB_ENV
+          echo "ASSET_SUM=$ARCHIVE.tar.gz.sha256" >> $GITHUB_ENV
+
+      - name: Upload release archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: gh release upload "$VERSION" $ASSET $ASSET_SUM
