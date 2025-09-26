@@ -1,4 +1,4 @@
-# randstream: Reproducible Stream Generator and Validator
+# randstream: Reproducible Random Stream Generator and Validator
 
 **`randstream`** is a high-performance command-line utility for creating and
 validating reproducible, pseudo-random data streams. It is designed for use
