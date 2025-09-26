@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
 use itertools::Itertools as _;
-use log::debug;
+use log::{debug, info};
 use parse_size::parse_size;
 use rand::{RngCore, SeedableRng};
 use rand_pcg::Pcg64Mcg;
@@ -74,10 +74,9 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     }
     debug!("seed: {}", hex::encode(seed));
 
-    let mut bytes_generated: u64 = 0;
     let pb = (!args.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
 
-    if let Some(file) = &args.file {
+    let (bytes_generated, checksum) = if let Some(file) = &args.file {
         {
             // make sure the output file exists, before opening it in the threads
             let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
@@ -96,8 +95,9 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
             .map(|i| {
                 let file = file.clone();
                 let tx = tx.clone();
-                thread::spawn(move || -> anyhow::Result<u64> {
+                thread::spawn(move || -> anyhow::Result<_> {
                     let mut writer = OpenOptions::new().write(true).open(file)?;
+                    let mut thread_hasher = Hasher::new();
                     let mut rng = Pcg64Mcg::from_seed(seed);
                     let mut buffer = vec![0; buffer_size];
                     let start_chunk = i * chunks_per_thread;
@@ -111,6 +111,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
                             ((stream_size - (chunk * chunk_size as u64)) as usize).min(chunk_size);
                         generate_chunk(&mut rng, &mut buffer, write_size);
                         writer.write_all(&buffer[..write_size])?;
+                        thread_hasher.update(&buffer[..write_size]);
                         total_write_size += write_size as u64;
                         progress_bytes += write_size as u64;
                         if chunk % 100 == 0 {
@@ -118,28 +119,42 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
                             progress_bytes = 0;
                         }
                     }
-                    Ok(total_write_size)
+                    Ok((total_write_size, thread_hasher))
                 })
             })
             .collect();
         receive_progress(&pb, &rx, tx);
-        let written_bytes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
-        bytes_generated = written_bytes.iter().sum();
+        let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
+
+        let write_bytes = thread_data.iter().map(|(b, _)| b).sum();
+
+        let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
+        let mut hasher = thread_hashers[0].clone();
+        for partial_hasher in thread_hashers[1..].iter() {
+            hasher.combine(partial_hasher)
+        }
+
+        (write_bytes, hasher.finalize())
     } else {
         debug!("number of threads: 1");
         let mut writer = io::stdout();
         let mut rng = Pcg64Mcg::from_seed(seed);
         let mut buffer = vec![0u8; chunk_size];
+        let mut bytes_generated: u64 = 0;
+        let mut hasher = Hasher::new();
         while bytes_generated < stream_size {
             let write_size = (stream_size - bytes_generated).min(chunk_size as u64) as usize;
             generate_chunk(&mut rng, &mut buffer, write_size);
             writer.write_all(&buffer[..write_size])?;
+            hasher.update(&buffer[..write_size]);
             bytes_generated += write_size as u64;
             if let Some(pb) = &pb {
                 pb.set_position(bytes_generated);
             }
         }
+        (bytes_generated, hasher.finalize())
     };
+    info!("checksum: {checksum:08x}");
     debug!("written bytes: {bytes_generated}");
     debug!(
         "throughput: {:.2?}GBi/s",
