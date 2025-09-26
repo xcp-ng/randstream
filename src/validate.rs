@@ -50,17 +50,17 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     let chunk_size = parse_size(&args.chunk_size)? as usize;
     let bytes_validated = if let Some(file) = &args.file {
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
-        let file_len: u64 =
+        let stream_size: u64 =
             if let Some(size) = &args.size { parse_size(size)? } else { read_file_size(file)? };
-        let pb = (!args.no_progress).then_some(set_up_progress_bar(Some(file_len))).transpose()?;
+        let pb =
+            (!args.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
 
-        debug!("read size: {file_len}");
+        debug!("read size: {stream_size}");
         debug!("number of threads: {num_threads}");
         debug!("chunk size: {chunk_size}");
 
-        let num_chunks = (file_len as f64 / chunk_size as f64).ceil() as u64;
+        let num_chunks = (stream_size as f64 / chunk_size as f64).ceil() as u64;
         let chunks_per_thread = (num_chunks as f64 / num_threads as f64).ceil() as u64;
-
         let (tx, rx) = mpsc::channel::<u64>();
 
         let handles: Vec<_> = (0..num_threads as u64)

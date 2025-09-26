@@ -73,8 +73,8 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         hex::decode_to_slice(format!("{:0>32}", seed_hex), &mut seed)?;
     }
     debug!("seed: {}", hex::encode(seed));
-    let mut bytes_generated: u64 = 0;
 
+    let mut bytes_generated: u64 = 0;
     let pb = (!args.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
 
     if let Some(file) = &args.file {
@@ -91,6 +91,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         let num_chunks = (stream_size as f64 / chunk_size as f64).ceil() as u64;
         let chunks_per_thread = (num_chunks as f64 / num_threads as f64).ceil() as u64;
         let (tx, rx) = mpsc::channel::<u64>();
+
         let handles: Vec<_> = (0..num_threads as u64)
             .map(|i| {
                 let file = file.clone();
@@ -106,12 +107,12 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
                     let mut total_write_size: u64 = 0;
                     let mut progress_bytes: u64 = 0;
                     for chunk in start_chunk..end_chunk {
-                        let bytes_to_generate =
+                        let write_size =
                             ((stream_size - (chunk * chunk_size as u64)) as usize).min(chunk_size);
-                        generate_chunk(&mut rng, &mut buffer, bytes_to_generate);
-                        writer.write_all(&buffer[..bytes_to_generate])?;
-                        total_write_size += bytes_to_generate as u64;
-                        progress_bytes += bytes_to_generate as u64;
+                        generate_chunk(&mut rng, &mut buffer, write_size);
+                        writer.write_all(&buffer[..write_size])?;
+                        total_write_size += write_size as u64;
+                        progress_bytes += write_size as u64;
                         if chunk % 100 == 0 {
                             tx.send(progress_bytes)?;
                             progress_bytes = 0;
@@ -130,11 +131,10 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         let mut rng = Pcg64Mcg::from_seed(seed);
         let mut buffer = vec![0u8; chunk_size];
         while bytes_generated < stream_size {
-            let remaining_bytes = stream_size - bytes_generated;
-            let bytes_to_generate = remaining_bytes.min(chunk_size as u64) as usize;
-            generate_chunk(&mut rng, &mut buffer, bytes_to_generate);
-            writer.write_all(&buffer[..bytes_to_generate])?;
-            bytes_generated += bytes_to_generate as u64;
+            let write_size = (stream_size - bytes_generated).min(chunk_size as u64) as usize;
+            generate_chunk(&mut rng, &mut buffer, write_size);
+            writer.write_all(&buffer[..write_size])?;
+            bytes_generated += write_size as u64;
             if let Some(pb) = &pb {
                 pb.set_position(bytes_generated);
             }
@@ -150,16 +150,16 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn generate_chunk(rng: &mut Pcg64Mcg, buffer: &mut [u8], bytes_to_generate: usize) {
-    if bytes_to_generate >= 4 {
+fn generate_chunk(rng: &mut Pcg64Mcg, buffer: &mut [u8], write_size: usize) {
+    if write_size >= 4 {
         rng.fill_bytes(&mut buffer[..]);
         let mut hasher = Hasher::new();
-        hasher.update(&buffer[..bytes_to_generate - 4]);
+        hasher.update(&buffer[..write_size - 4]);
         let checksum_bytes = hasher.finalize().to_le_bytes();
-        let end_slice = &mut buffer[bytes_to_generate - 4..bytes_to_generate];
+        let end_slice = &mut buffer[write_size - 4..write_size];
         end_slice.copy_from_slice(&checksum_bytes);
     } else {
         // not enough room to fit the checksum, just push some zeros in there
-        buffer[..bytes_to_generate].fill(0);
+        buffer[..write_size].fill(0);
     }
 }
