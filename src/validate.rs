@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
+use human_units::{FormatDuration, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
@@ -144,11 +145,11 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     info!("checksum: {checksum:08x}");
     debug!("read bytes: {bytes_validated}");
     debug!(
-        "throughput: {:.2?}GBi/s",
-        (bytes_validated / (1024 * 1024 * 1024)) as f32 / start.elapsed().as_micros() as f32
-            * 1000000.0
+        "throughput: {}/s",
+        ((bytes_validated as f32 / start.elapsed().as_micros() as f32 * 1000000.0) as usize)
+            .format_size()
     );
-    debug!("run in {:.2?}", start.elapsed());
+    debug!("run in {}", start.elapsed().format_duration());
     Ok(0)
 }
 
