@@ -52,3 +52,8 @@ randstream generate --size 10G --seed 1a234e5678 --jobs 2 output.bin
 ```bash
 randstream generate output.bin
 ```
+
+## TODO
+
+[ ] start position
+[ ] combine the chunk hasher in the thread/global hasher
