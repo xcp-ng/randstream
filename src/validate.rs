@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
 use itertools::Itertools as _;
-use log::debug;
+use log::{debug, info};
 use parse_size::parse_size;
 use std::fs::File;
 use std::io::{self, Seek};
@@ -23,6 +23,12 @@ pub struct ValidateArgs {
     /// The input file
     #[arg()]
     pub file: Option<PathBuf>,
+
+    /// The expected checksum
+    ///
+    /// Generates an error if it doesn't match the stream checksum
+    #[clap(short, long)]
+    pub expected_checksum: Option<String>,
 
     /// The stream size
     ///
@@ -48,7 +54,7 @@ pub struct ValidateArgs {
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
     let chunk_size = parse_size(&args.chunk_size)? as usize;
-    let bytes_validated = if let Some(file) = &args.file {
+    let (bytes_validated, checksum) = if let Some(file) = &args.file {
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
         let stream_size: u64 =
             if let Some(size) = &args.size { parse_size(size)? } else { read_file_size(file)? };
@@ -67,8 +73,9 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
             .map(|i| {
                 let file = file.clone();
                 let tx = tx.clone();
-                thread::spawn(move || -> anyhow::Result<u64> {
+                thread::spawn(move || -> anyhow::Result<_> {
                     let mut file = File::open(file)?;
+                    let mut thread_hasher = Hasher::new();
                     let start_chunk = i * chunks_per_thread;
                     let end_chunk = ((i + 1) * chunks_per_thread).min(num_chunks);
                     let mut buffer = vec![0; chunk_size];
@@ -78,6 +85,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                     for chunk in start_chunk..end_chunk {
                         let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
                         validate_chunk(chunk, &buffer[..read_size])?;
+                        thread_hasher.update(&buffer[..read_size]);
                         total_read_size += read_size as u64;
                         progress_bytes += read_size as u64;
                         if chunk % 100 == 0 {
@@ -85,13 +93,22 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                             progress_bytes = 0;
                         }
                     }
-                    Ok(total_read_size)
+                    Ok((total_read_size, thread_hasher))
                 })
             })
             .collect();
         receive_progress(&pb, &rx, tx);
-        let read_bytes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
-        read_bytes.iter().sum()
+        let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
+
+        let read_bytes = thread_data.iter().map(|(b, _)| b).sum();
+
+        let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
+        let mut hasher = thread_hashers[0].clone();
+        for partial_hasher in thread_hashers[1..].iter() {
+            hasher.combine(partial_hasher)
+        }
+
+        (read_bytes, hasher.finalize())
     } else {
         debug!("read size: ∞");
         debug!("number of threads: 1");
@@ -99,6 +116,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         let mut buffer = vec![0; chunk_size];
         let mut stream_size: u64 = 0;
         let mut chunk: u64 = 0;
+        let mut hasher = Hasher::new();
         let pb = (!args.no_progress).then_some(set_up_progress_bar(None)).transpose()?;
         loop {
             let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
@@ -107,14 +125,23 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                 break;
             }
             validate_chunk(chunk, &buffer[..read_size])?;
+            hasher.update(&buffer[..read_size]);
             stream_size += read_size as u64;
             chunk += 1;
             if let Some(pb) = &pb {
                 pb.set_position(stream_size);
             }
         }
-        stream_size
+        (stream_size, hasher.finalize())
     };
+    if let Some(expected_checksum) = &args.expected_checksum
+        && expected_checksum != &format!("{checksum:08x}")
+    {
+        return Err(anyhow!(
+            "Checksum mismatch. It was expected to be {expected_checksum}, but is actually {checksum:x}"
+        ));
+    }
+    info!("checksum: {checksum:08x}");
     debug!("read bytes: {bytes_validated}");
     debug!(
         "throughput: {:.2?}GBi/s",
