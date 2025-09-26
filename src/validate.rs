@@ -1,10 +1,9 @@
 use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
-use human_units::{FormatDuration, FormatSize as _};
+use human_units::{FormatDuration, FormatSize as _, Size};
 use itertools::Itertools as _;
 use log::{debug, info};
-use parse_size::parse_size;
 use std::fs::File;
 use std::io::{self, Seek};
 use std::path::PathBuf;
@@ -34,8 +33,8 @@ pub struct ValidateArgs {
     /// The stream size
     ///
     /// Defaults to the provided file size
-    #[clap(short, long)]
-    pub size: Option<String>,
+    #[clap(short, long, value_parser=clap::value_parser!(Size))]
+    pub size: Option<Size>,
 
     /// The number of parallel jobs
     ///
@@ -44,8 +43,8 @@ pub struct ValidateArgs {
     pub jobs: Option<usize>,
 
     /// The chunk size
-    #[clap(short, long, default_value = "32ki")]
-    pub chunk_size: String,
+    #[clap(short, long, default_value = "32k", value_parser=clap::value_parser!(Size))]
+    pub chunk_size: Size,
 
     /// Hide the progress bar
     #[clap(short, long)]
@@ -54,11 +53,11 @@ pub struct ValidateArgs {
 
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
-    let chunk_size = parse_size(&args.chunk_size)? as usize;
+    let chunk_size = args.chunk_size.0 as usize;
     let (bytes_validated, checksum) = if let Some(file) = &args.file {
         let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
         let stream_size: u64 =
-            if let Some(size) = &args.size { parse_size(size)? } else { read_file_size(file)? };
+            if let Some(size) = &args.size { size.0 } else { read_file_size(file)? };
         let pb =
             (!args.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
 

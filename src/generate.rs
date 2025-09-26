@@ -1,10 +1,9 @@
 use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
-use human_units::{FormatDuration as _, FormatSize as _};
+use human_units::{FormatDuration as _, FormatSize as _, Size};
 use itertools::Itertools as _;
 use log::{debug, info};
-use parse_size::parse_size;
 use rand::{RngCore, SeedableRng};
 use rand_pcg::Pcg64Mcg;
 use std::fs::OpenOptions;
@@ -28,8 +27,8 @@ pub struct GenerateArgs {
     ///
     /// Defaults to the provide file size if it exists, generates an infinite
     /// stream otherwise
-    #[clap(short, long)]
-    pub size: Option<String>,
+    #[clap(short, long, value_parser=clap::value_parser!(Size))]
+    pub size: Option<Size>,
 
     /// The random generator seed
     ///
@@ -44,8 +43,8 @@ pub struct GenerateArgs {
     pub jobs: Option<usize>,
 
     /// The chunk size
-    #[clap(short, long, default_value = "32ki")]
-    pub chunk_size: String,
+    #[clap(short, long, default_value = "32k", value_parser=clap::value_parser!(Size))]
+    pub chunk_size: Size,
 
     /// Hide the progress bar
     #[clap(short, long)]
@@ -54,12 +53,12 @@ pub struct GenerateArgs {
 
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
-    let chunk_size = parse_size(&args.chunk_size)? as usize;
+    let chunk_size = args.chunk_size.0 as usize;
     // we need to write a multiple a 64 bits to be able to use advance()
     let buffer_size = chunk_size.div_ceil(8) * 8;
     debug!("chunk size: {chunk_size}");
     let stream_size = if let Some(size) = &args.size {
-        parse_size(size)?
+        size.0
     } else if let Some(file) = &args.file
         && file.exists()
     {
