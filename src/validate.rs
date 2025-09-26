@@ -37,11 +37,11 @@ pub struct ValidateArgs {
 
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
-    let chunk_size = args.common.chunk_size.0 as usize;
+    let chunk_size = args.common.chunk_size as usize;
     let (bytes_validated, checksum) = if let Some(file) = &args.file {
         let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
         let stream_size: u64 =
-            if let Some(size) = &args.common.size { size.0 } else { read_file_size(file)? };
+            if let Some(size) = &args.common.size { *size } else { read_file_size(file)? };
         let pb = (!args.common.no_progress)
             .then_some(set_up_progress_bar(Some(stream_size)))
             .transpose()?;

@@ -36,12 +36,12 @@ pub struct GenerateArgs {
 
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
-    let chunk_size = args.common.chunk_size.0 as usize;
+    let chunk_size = args.common.chunk_size as usize;
     // we need to write a multiple a 64 bits to be able to use advance()
     let buffer_size = chunk_size.div_ceil(8) * 8;
     debug!("chunk size: {chunk_size}");
     let stream_size = if let Some(size) = &args.common.size {
-        size.0
+        *size
     } else if let Some(file) = &args.file
         && file.exists()
     {

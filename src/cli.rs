@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand, command};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
-use human_units::Size;
+use parse_size::parse_size;
 
 use crate::{generate::GenerateArgs, validate::ValidateArgs};
 
@@ -24,8 +24,8 @@ pub struct CommonArgs {
     /// The stream size
     ///
     /// Defaults to the provided file size
-    #[clap(short, long, value_parser=clap::value_parser!(Size))]
-    pub size: Option<Size>,
+    #[clap(short, long, value_parser=|s: &str| parse_size(s))]
+    pub size: Option<u64>,
 
     /// The number of parallel jobs
     ///
@@ -34,8 +34,8 @@ pub struct CommonArgs {
     pub jobs: Option<usize>,
 
     /// The chunk size
-    #[clap(short, long, default_value = "32k", value_parser=clap::value_parser!(Size))]
-    pub chunk_size: Size,
+    #[clap(short, long, default_value = "32k", value_parser=|s: &str| parse_size(s))]
+    pub chunk_size: u64,
 
     /// Hide the progress bar
     #[clap(short, long)]
