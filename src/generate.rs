@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
-use human_units::{FormatDuration as _, FormatSize as _, Size};
+use human_units::{FormatDuration as _, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
 use rand::{RngCore, SeedableRng};
@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
+use crate::cli::CommonArgs;
 use crate::{read_file_size, receive_progress, set_up_progress_bar};
 
 /// Generate a random stream
@@ -23,41 +24,23 @@ pub struct GenerateArgs {
     #[arg()]
     pub file: Option<PathBuf>,
 
-    /// The stream size
-    ///
-    /// Defaults to the provide file size if it exists, generates an infinite
-    /// stream otherwise
-    #[clap(short, long, value_parser=clap::value_parser!(Size))]
-    pub size: Option<Size>,
-
     /// The random generator seed
     ///
     /// An hexidecimal notation is expected. The size can't exceed 16 bytes
     #[clap(short = 'S', long)]
     pub seed: Option<String>,
 
-    /// The number of parallel jobs
-    ///
-    /// Defaults to the number of physical cores on the host
-    #[clap(short, long)]
-    pub jobs: Option<usize>,
-
-    /// The chunk size
-    #[clap(short, long, default_value = "32k", value_parser=clap::value_parser!(Size))]
-    pub chunk_size: Size,
-
-    /// Hide the progress bar
-    #[clap(short, long)]
-    pub no_progress: bool,
+    #[clap(flatten)]
+    pub common: CommonArgs,
 }
 
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
-    let chunk_size = args.chunk_size.0 as usize;
+    let chunk_size = args.common.chunk_size.0 as usize;
     // we need to write a multiple a 64 bits to be able to use advance()
     let buffer_size = chunk_size.div_ceil(8) * 8;
     debug!("chunk size: {chunk_size}");
-    let stream_size = if let Some(size) = &args.size {
+    let stream_size = if let Some(size) = &args.common.size {
         size.0
     } else if let Some(file) = &args.file
         && file.exists()
@@ -74,7 +57,8 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     }
     debug!("seed: {}", hex::encode(seed));
 
-    let pb = (!args.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
+    let pb =
+        (!args.common.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
 
     let (bytes_generated, checksum) = if let Some(file) = &args.file {
         {
@@ -85,7 +69,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
                 f.set_len(stream_size)?;
             }
         }
-        let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
+        let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
         debug!("number of threads: {num_threads}");
         let num_chunks = (stream_size as f64 / chunk_size as f64).ceil() as u64;
         let chunks_per_thread = (num_chunks as f64 / num_threads as f64).ceil() as u64;

@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use clap::{Args, arg, command};
 use crc32fast::Hasher;
-use human_units::{FormatDuration, FormatSize as _, Size};
+use human_units::{FormatDuration, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
 use std::fs::File;
@@ -11,6 +11,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
+use crate::cli::CommonArgs;
 use crate::{read_exact_or_eof, read_file_size, receive_progress, set_up_progress_bar};
 
 /// Validate a random stream
@@ -30,36 +31,20 @@ pub struct ValidateArgs {
     #[clap(short, long)]
     pub expected_checksum: Option<String>,
 
-    /// The stream size
-    ///
-    /// Defaults to the provided file size
-    #[clap(short, long, value_parser=clap::value_parser!(Size))]
-    pub size: Option<Size>,
-
-    /// The number of parallel jobs
-    ///
-    /// Defaults to the number of physical cores on the host
-    #[clap(short, long)]
-    pub jobs: Option<usize>,
-
-    /// The chunk size
-    #[clap(short, long, default_value = "32k", value_parser=clap::value_parser!(Size))]
-    pub chunk_size: Size,
-
-    /// Hide the progress bar
-    #[clap(short, long)]
-    pub no_progress: bool,
+    #[clap(flatten)]
+    pub common: CommonArgs,
 }
 
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
-    let chunk_size = args.chunk_size.0 as usize;
+    let chunk_size = args.common.chunk_size.0 as usize;
     let (bytes_validated, checksum) = if let Some(file) = &args.file {
-        let num_threads = args.jobs.unwrap_or(num_cpus::get_physical());
+        let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
         let stream_size: u64 =
-            if let Some(size) = &args.size { size.0 } else { read_file_size(file)? };
-        let pb =
-            (!args.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
+            if let Some(size) = &args.common.size { size.0 } else { read_file_size(file)? };
+        let pb = (!args.common.no_progress)
+            .then_some(set_up_progress_bar(Some(stream_size)))
+            .transpose()?;
 
         debug!("read size: {stream_size}");
         debug!("number of threads: {num_threads}");
@@ -117,7 +102,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         let mut stream_size: u64 = 0;
         let mut chunk: u64 = 0;
         let mut hasher = Hasher::new();
-        let pb = (!args.no_progress).then_some(set_up_progress_bar(None)).transpose()?;
+        let pb = (!args.common.no_progress).then_some(set_up_progress_bar(None)).transpose()?;
         loop {
             let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
             if read_size == 0 {
