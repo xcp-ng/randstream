@@ -56,4 +56,3 @@ randstream generate output.bin
 ## TODO
 
 - [ ] start position
-- [ ] combine the chunk hasher in the thread/global hasher

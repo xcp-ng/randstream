@@ -69,8 +69,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                     let mut progress_bytes: u64 = 0;
                     for chunk in start_chunk..end_chunk {
                         let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
-                        validate_chunk(chunk, &buffer[..read_size])?;
-                        thread_hasher.update(&buffer[..read_size]);
+                        validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
                         total_read_size += read_size as u64;
                         progress_bytes += read_size as u64;
                         if chunk % 100 == 0 {
@@ -109,8 +108,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                 // End of input stream (EOF)
                 break;
             }
-            validate_chunk(chunk, &buffer[..read_size])?;
-            hasher.update(&buffer[..read_size]);
+            validate_chunk(chunk, &buffer[..read_size], &mut hasher)?;
             stream_size += read_size as u64;
             chunk += 1;
             if let Some(pb) = &pb {
@@ -137,11 +135,13 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn validate_chunk(chunk: u64, buffer: &[u8]) -> anyhow::Result<()> {
+fn validate_chunk(chunk: u64, buffer: &[u8], global_hasher: &mut Hasher) -> anyhow::Result<()> {
     let mut hasher = Hasher::new();
     let read_size = buffer.len();
     if read_size >= 4 {
         hasher.update(&buffer[..read_size - 4]);
+        global_hasher.combine(&hasher);
+        global_hasher.update(&buffer[read_size - 4..read_size]);
         let stream_checksum =
             u32::from_le_bytes(buffer[read_size - 4..read_size].try_into().unwrap());
         let checksum = hasher.finalize();
@@ -153,6 +153,7 @@ fn validate_chunk(chunk: u64, buffer: &[u8]) -> anyhow::Result<()> {
             ));
         }
     } else {
+        global_hasher.update(&buffer[..read_size]);
         for v in buffer[..read_size].iter() {
             if *v != 0 {
                 return Err(anyhow!("Invalid non-zero value at the end of the file"));

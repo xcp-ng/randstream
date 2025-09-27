@@ -93,9 +93,8 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
                     for chunk in start_chunk..end_chunk {
                         let write_size =
                             ((stream_size - (chunk * chunk_size as u64)) as usize).min(chunk_size);
-                        generate_chunk(&mut rng, &mut buffer, write_size);
+                        generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher);
                         writer.write_all(&buffer[..write_size])?;
-                        thread_hasher.update(&buffer[..write_size]);
                         total_write_size += write_size as u64;
                         progress_bytes += write_size as u64;
                         if chunk % 100 == 0 {
@@ -128,9 +127,8 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         let mut hasher = Hasher::new();
         while bytes_generated < stream_size {
             let write_size = (stream_size - bytes_generated).min(chunk_size as u64) as usize;
-            generate_chunk(&mut rng, &mut buffer, write_size);
+            generate_chunk(&mut rng, &mut buffer, write_size, &mut hasher);
             writer.write_all(&buffer[..write_size])?;
-            hasher.update(&buffer[..write_size]);
             bytes_generated += write_size as u64;
             if let Some(pb) = &pb {
                 pb.set_position(bytes_generated);
@@ -149,16 +147,24 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn generate_chunk(rng: &mut Pcg64Mcg, buffer: &mut [u8], write_size: usize) {
+fn generate_chunk(
+    rng: &mut Pcg64Mcg,
+    buffer: &mut [u8],
+    write_size: usize,
+    global_hasher: &mut Hasher,
+) {
     if write_size >= 4 {
         rng.fill_bytes(&mut buffer[..]);
         let mut hasher = Hasher::new();
         hasher.update(&buffer[..write_size - 4]);
+        global_hasher.combine(&hasher);
         let checksum_bytes = hasher.finalize().to_le_bytes();
         let end_slice = &mut buffer[write_size - 4..write_size];
         end_slice.copy_from_slice(&checksum_bytes);
+        global_hasher.update(&checksum_bytes);
     } else {
         // not enough room to fit the checksum, just push some zeros in there
         buffer[..write_size].fill(0);
+        global_hasher.update(&buffer[..write_size]);
     }
 }
