@@ -4,6 +4,7 @@ use crc32fast::Hasher;
 use human_units::{FormatDuration as _, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
+use parse_size::parse_size;
 use rand::{RngCore, SeedableRng};
 use rand_pcg::Pcg64Mcg;
 use std::fs::OpenOptions;
@@ -24,6 +25,12 @@ pub struct GenerateArgs {
     #[arg()]
     pub file: Option<PathBuf>,
 
+    /// The stream position
+    ///
+    /// Must be a multiple of the chunk size
+    #[clap(short, long, default_value = "0", value_parser=|s: &str| parse_size(s), requires="file")]
+    pub position: u64,
+
     /// The random generator seed
     ///
     /// An hexidecimal notation is expected. The size can't exceed 16 bytes
@@ -39,26 +46,41 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let chunk_size = args.common.chunk_size as usize;
     // we need to write a multiple a 64 bits to be able to use advance()
     let buffer_size = chunk_size.div_ceil(8) * 8;
-    debug!("chunk size: {chunk_size}");
+    if !args.position.is_multiple_of(args.common.chunk_size) {
+        return Err(anyhow!(
+            "The start position {} is not a multiple of the chunk size {chunk_size}",
+            args.position
+        ));
+    }
     let stream_size = if let Some(size) = &args.common.size {
         *size
     } else if let Some(file) = &args.file
         && file.exists()
     {
-        read_file_size(file)?
+        let size = read_file_size(file)?;
+        if args.position > size {
+            return Err(anyhow!(
+                "The position {} is greater than the file size {size}",
+                args.position
+            ));
+        }
+        size - args.position
     } else {
         return Err(anyhow!("Size can't be determined. Use --size to provide a stream size."));
     };
-    debug!("write size: {stream_size}",);
 
     let mut seed = [0u8; 16];
     if let Some(seed_hex) = &args.seed {
         hex::decode_to_slice(format!("{:0>32}", seed_hex), &mut seed)?;
     }
-    debug!("seed: {}", hex::encode(seed));
 
     let pb =
         (!args.common.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
+
+    debug!("position: {}", args.position);
+    debug!("stream size: {stream_size}");
+    debug!("chunk size: {chunk_size}");
+    debug!("seed: {}", hex::encode(seed));
 
     let (bytes_generated, checksum) = if let Some(file) = &args.file {
         {
@@ -66,33 +88,36 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
             let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
             // and that the file size matches the requested size
             if file.is_file() {
-                f.set_len(stream_size)?;
+                f.set_len(stream_size + args.position)?;
             }
         }
         let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
         debug!("number of threads: {num_threads}");
-        let num_chunks = (stream_size as f64 / chunk_size as f64).ceil() as u64;
-        let chunks_per_thread = (num_chunks as f64 / num_threads as f64).ceil() as u64;
+        let num_chunks = stream_size.div_ceil(chunk_size as u64);
+        let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
+        let chunk_position = args.position / chunk_size as u64;
         let (tx, rx) = mpsc::channel::<u64>();
 
         let handles: Vec<_> = (0..num_threads as u64)
             .map(|i| {
                 let file = file.clone();
+                let position = args.position;
                 let tx = tx.clone();
                 thread::spawn(move || -> anyhow::Result<_> {
                     let mut writer = OpenOptions::new().write(true).open(file)?;
                     let mut thread_hasher = Hasher::new();
                     let mut rng = Pcg64Mcg::from_seed(seed);
                     let mut buffer = vec![0; buffer_size];
-                    let start_chunk = i * chunks_per_thread;
-                    let end_chunk = ((i + 1) * chunks_per_thread).min(num_chunks);
+                    let start_chunk = i * chunks_per_thread + chunk_position;
+                    let end_chunk = ((i + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
                     writer.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
                     rng.advance(((start_chunk * buffer_size as u64) / 8).into());
                     let mut total_write_size: u64 = 0;
                     let mut progress_bytes: u64 = 0;
                     for chunk in start_chunk..end_chunk {
-                        let write_size =
-                            ((stream_size - (chunk * chunk_size as u64)) as usize).min(chunk_size);
+                        let write_size = ((position + stream_size - (chunk * chunk_size as u64))
+                            as usize)
+                            .min(chunk_size);
                         generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher);
                         writer.write_all(&buffer[..write_size])?;
                         total_write_size += write_size as u64;

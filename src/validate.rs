@@ -4,8 +4,9 @@ use crc32fast::Hasher;
 use human_units::{FormatDuration, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
+use parse_size::parse_size;
 use std::fs::File;
-use std::io::{self, Seek};
+use std::io::{self, Read, Seek};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -25,6 +26,12 @@ pub struct ValidateArgs {
     #[arg()]
     pub file: Option<PathBuf>,
 
+    /// The stream position
+    ///
+    /// Must be a multiple of the chunk size
+    #[clap(short, long, default_value = "0", value_parser=|s: &str| parse_size(s))]
+    pub position: u64,
+
     /// The expected checksum
     ///
     /// Generates an error if it doesn't match the stream checksum
@@ -38,20 +45,38 @@ pub struct ValidateArgs {
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
     let chunk_size = args.common.chunk_size as usize;
+    if !args.position.is_multiple_of(args.common.chunk_size) {
+        return Err(anyhow!(
+            "The start position {} is not a multiple of the chunk size {chunk_size}",
+            args.position
+        ));
+    }
     let (bytes_validated, checksum) = if let Some(file) = &args.file {
         let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
-        let stream_size: u64 =
-            if let Some(size) = &args.common.size { *size } else { read_file_size(file)? };
+        let stream_size: u64 = if let Some(size) = &args.common.size {
+            *size
+        } else {
+            let size = read_file_size(file)?;
+            if args.position > size {
+                return Err(anyhow!(
+                    "The position {} is greater than the file size {size}",
+                    args.position
+                ));
+            }
+            size - args.position
+        };
         let pb = (!args.common.no_progress)
             .then_some(set_up_progress_bar(Some(stream_size)))
             .transpose()?;
 
-        debug!("read size: {stream_size}");
+        debug!("position: {}", args.position);
+        debug!("stream size: {stream_size}");
         debug!("number of threads: {num_threads}");
         debug!("chunk size: {chunk_size}");
 
-        let num_chunks = (stream_size as f64 / chunk_size as f64).ceil() as u64;
-        let chunks_per_thread = (num_chunks as f64 / num_threads as f64).ceil() as u64;
+        let num_chunks = stream_size.div_ceil(chunk_size as u64);
+        let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
+        let chunk_position = args.position / chunk_size as u64;
         let (tx, rx) = mpsc::channel::<u64>();
 
         let handles: Vec<_> = (0..num_threads as u64)
@@ -61,8 +86,8 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
                 thread::spawn(move || -> anyhow::Result<_> {
                     let mut file = File::open(file)?;
                     let mut thread_hasher = Hasher::new();
-                    let start_chunk = i * chunks_per_thread;
-                    let end_chunk = ((i + 1) * chunks_per_thread).min(num_chunks);
+                    let start_chunk = i * chunks_per_thread + chunk_position;
+                    let end_chunk = ((i + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
                     let mut buffer = vec![0; chunk_size];
                     file.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
                     let mut total_read_size: u64 = 0;
@@ -94,15 +119,21 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
 
         (read_bytes, hasher.finalize())
     } else {
-        debug!("read size: ∞");
+        debug!("position: {}", args.position);
+        debug!(
+            "stream size: {}",
+            if let Some(size) = args.common.size { size.to_string() } else { "∞".to_string() }
+        );
         debug!("number of threads: 1");
         debug!("chunk size: {chunk_size}");
+        // discard the first values up to position
+        io::copy(&mut io::stdin().take(args.position), &mut io::sink())?;
         let mut buffer = vec![0; chunk_size];
         let mut stream_size: u64 = 0;
-        let mut chunk: u64 = 0;
+        let mut chunk: u64 = args.position / chunk_size as u64;
         let mut hasher = Hasher::new();
         let pb = (!args.common.no_progress).then_some(set_up_progress_bar(None)).transpose()?;
-        loop {
+        while args.common.size.map(|s| stream_size < s).unwrap_or(true) {
             let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
             if read_size == 0 {
                 // End of input stream (EOF)
