@@ -2,6 +2,14 @@
 name = "randstream"
 version = "0.1.0"
 edition = "2024"
+authors = ["Gaëtan Lehmann <gaetan.lehmann@vates.tech>"]
+description = "Reproducible Random Stream Generator and Validator"
+readme = "README.md"
+repository = "https://github.com/xcp-ng/randstream.git"
+homepage = "https://github.com/xcp-ng/randstream/"
+documentation = "https://github.com/xcp-ng/randstream/"
+license = "MIT"
+keywords = ["random", "performance", "stream"]
 
 [dependencies]
 anyhow = "1.0.100"
