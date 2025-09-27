@@ -34,7 +34,7 @@ pub struct CommonArgs {
     pub jobs: Option<usize>,
 
     /// The chunk size
-    #[clap(short, long, default_value = "32k", value_parser=|s: &str| parse_size(s))]
+    #[clap(short, long, default_value = "32ki", value_parser=|s: &str| parse_size(s))]
     pub chunk_size: u64,
 
     /// Hide the progress bar
