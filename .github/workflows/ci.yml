@@ -54,9 +54,9 @@ jobs:
       with:
         toolchain: ${{ matrix.rust }}
         target: ${{ matrix.target }}
-    - run: cargo build --workspace --target ${{ matrix.target }} --release
-    - run: cargo run --target ${{ matrix.target }} --release -- --help
-    - run: cargo test --workspace --target ${{ matrix.target }} --release
+    - run: cargo build --workspace --target ${{ matrix.target }}
+    - run: cargo run --target ${{ matrix.target }} -- --help
+    - run: cargo test --workspace --target ${{ matrix.target }}
       env:
         NO_COLOR: "true"
 
