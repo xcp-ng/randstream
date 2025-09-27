@@ -1,5 +1,6 @@
-use clap::{Parser, Subcommand, command};
+use clap::{Args, Parser, Subcommand, command};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
+use parse_size::parse_size;
 
 use crate::{generate::GenerateArgs, validate::ValidateArgs};
 
@@ -16,6 +17,29 @@ pub struct Cli {
 
     #[command(flatten)]
     pub verbose: Verbosity<InfoLevel>,
+}
+
+#[derive(Args, Debug)]
+pub struct CommonArgs {
+    /// The stream size
+    ///
+    /// Defaults to the provided file size
+    #[clap(short, long, value_parser=|s: &str| parse_size(s))]
+    pub size: Option<u64>,
+
+    /// The number of parallel jobs
+    ///
+    /// Defaults to the number of physical cores on the host
+    #[clap(short, long)]
+    pub jobs: Option<usize>,
+
+    /// The chunk size
+    #[clap(short, long, default_value = "32ki", value_parser=|s: &str| parse_size(s))]
+    pub chunk_size: u64,
+
+    /// Hide the progress bar
+    #[clap(short = 'P', long)]
+    pub no_progress: bool,
 }
 
 #[derive(Subcommand, Debug)]

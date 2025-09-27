@@ -54,9 +54,9 @@ jobs:
       with:
         toolchain: ${{ matrix.rust }}
         target: ${{ matrix.target }}
-    - run: cargo build --workspace --target ${{ matrix.target }} --release
-    - run: cargo run --target ${{ matrix.target }} --release -- --help
-    - run: cargo test --workspace --target ${{ matrix.target }} --release
+    - run: cargo build --workspace --target ${{ matrix.target }}
+    - run: cargo run --target ${{ matrix.target }} -- --help
+    - run: cargo test --workspace --target ${{ matrix.target }}
       env:
         NO_COLOR: "true"
 
@@ -99,3 +99,15 @@ jobs:
       env:
         PR_URL: ${{github.event.pull_request.html_url}}
         GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+      - run: uvx zizmor .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
