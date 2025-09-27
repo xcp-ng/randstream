@@ -14,6 +14,16 @@ parallel tasks.
 
 ## Installation
 
+Download the archive for your platform from the [releases page](./releases).
+
+Or install the binary with `cargo-binstall`:
+
+```bash
+cargo binstall ranstream
+```
+
+Or install from source:
+
 ```bash
 cargo install randstream
 ````
