@@ -37,6 +37,10 @@ pub struct GenerateArgs {
     #[clap(short = 'S', long)]
     pub seed: Option<String>,
 
+    /// Don't truncate the file
+    #[clap(short = 't', long)]
+    pub no_truncate: bool,
+
     #[clap(flatten)]
     pub common: CommonArgs,
 }
@@ -88,7 +92,10 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
             let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
             // and that the file size matches the requested size
             if file.is_file() {
-                f.set_len(stream_size + args.position)?;
+                let end_position = stream_size + args.position;
+                if end_position > file.metadata()?.len() || !args.no_truncate {
+                    f.set_len(end_position)?;
+                }
             }
         }
         let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());

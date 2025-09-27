@@ -38,7 +38,7 @@ pub struct CommonArgs {
     pub chunk_size: u64,
 
     /// Hide the progress bar
-    #[clap(short, long)]
+    #[clap(short = 'p', long)]
     pub no_progress: bool,
 }
 
