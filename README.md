@@ -26,7 +26,7 @@ cargo install randstream
 
 Use the generate command to create a reproducible stream of pseudo-random data.
 
-## Validating a Random Stream (`validate`)
+### Validating a Random Stream (`validate`)
 
 Use the `validate` command to verify that an existing stream has not been
 corrupted or altered. The validation process will **re-generate** the data
