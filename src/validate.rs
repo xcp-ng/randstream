@@ -8,7 +8,8 @@ use parse_size::parse_size;
 use std::fs::File;
 use std::io::{self, Read, Seek};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Instant;
 
@@ -78,31 +79,46 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
         let chunk_position = args.position / chunk_size as u64;
         let (tx, rx) = mpsc::channel::<u64>();
+        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         let handles: Vec<_> = (0..num_threads as u64)
             .map(|i| {
                 let file = file.clone();
                 let tx = tx.clone();
+                let cancel = cancel.clone();
                 thread::spawn(move || -> anyhow::Result<_> {
-                    let mut file = File::open(file)?;
-                    let mut thread_hasher = Hasher::new();
-                    let start_chunk = i * chunks_per_thread + chunk_position;
-                    let end_chunk = ((i + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
-                    let mut buffer = vec![0; chunk_size];
-                    file.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
-                    let mut total_read_size: u64 = 0;
-                    let mut progress_bytes: u64 = 0;
-                    for chunk in start_chunk..end_chunk {
-                        let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
-                        validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
-                        total_read_size += read_size as u64;
-                        progress_bytes += read_size as u64;
-                        if chunk % 100 == 0 {
-                            tx.send(progress_bytes)?;
-                            progress_bytes = 0;
+                    let run = || {
+                        let mut file = File::open(file)?;
+                        let mut thread_hasher = Hasher::new();
+                        let start_chunk = i * chunks_per_thread + chunk_position;
+                        let end_chunk =
+                            ((i + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
+                        let mut buffer = vec![0; chunk_size];
+                        file.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
+                        let mut total_read_size: u64 = 0;
+                        let mut progress_bytes: u64 = 0;
+                        for chunk in start_chunk..end_chunk {
+                            let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
+                            validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
+                            total_read_size += read_size as u64;
+                            progress_bytes += read_size as u64;
+                            if chunk % 100 == 0 {
+                                tx.send(progress_bytes)?;
+                                progress_bytes = 0;
+                            }
+                            if cancel.load(Ordering::Relaxed) {
+                                // just quit early
+                                return Ok((total_read_size, thread_hasher));
+                            }
                         }
+                        Ok((total_read_size, thread_hasher))
+                    };
+                    let result = run();
+                    if result.is_err() {
+                        // tell the other thread to stop there
+                        cancel.store(true, Ordering::Relaxed);
                     }
-                    Ok((total_read_size, thread_hasher))
+                    result
                 })
             })
             .collect();
