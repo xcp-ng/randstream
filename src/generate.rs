@@ -33,10 +33,8 @@ pub struct GenerateArgs {
     pub position: u64,
 
     /// The random generator seed
-    ///
-    /// An hexidecimal notation is expected. The size can't exceed 16 bytes
-    #[clap(short = 'S', long)]
-    pub seed: Option<String>,
+    #[clap(short = 'S', long, default_value = "0")]
+    pub seed: u64,
 
     /// Don't truncate the file
     #[clap(short = 't', long)]
@@ -74,18 +72,13 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         return Err(anyhow!("Size can't be determined. Use --size to provide a stream size."));
     };
 
-    let mut seed = [0u8; 16];
-    if let Some(seed_hex) = &args.seed {
-        hex::decode_to_slice(format!("{:0>32}", seed_hex), &mut seed)?;
-    }
-
     let pb =
         (!args.common.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
 
     debug!("position: {}", args.position);
     debug!("stream size: {stream_size}");
     debug!("chunk size: {chunk_size}");
-    debug!("seed: {}", hex::encode(seed));
+    debug!("seed: {}", args.seed);
 
     let (bytes_generated, checksum) = if let Some(file) = &args.file {
         {
@@ -109,6 +102,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
 
         let handles: Vec<_> = (0..num_threads as u64)
             .map(|i| {
+                let seed = args.seed;
                 let file = file.clone();
                 let position = args.position;
                 let tx = tx.clone();
@@ -117,7 +111,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
                     let run = || {
                         let mut writer = OpenOptions::new().write(true).open(file)?;
                         let mut thread_hasher = Hasher::new();
-                        let mut rng = Pcg64Mcg::from_seed(seed);
+                        let mut rng = Pcg64Mcg::seed_from_u64(seed);
                         let mut buffer = vec![0; buffer_size];
                         let start_chunk = i * chunks_per_thread + chunk_position;
                         let end_chunk =
@@ -169,7 +163,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     } else {
         debug!("number of threads: 1");
         let mut writer = io::stdout();
-        let mut rng = Pcg64Mcg::from_seed(seed);
+        let mut rng = Pcg64Mcg::seed_from_u64(args.seed);
         let mut buffer = vec![0u8; chunk_size];
         let mut bytes_generated: u64 = 0;
         let mut hasher = Hasher::new();

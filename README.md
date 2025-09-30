@@ -54,7 +54,7 @@ randstream generate /dev/xvdb
 **Generate a 100 GB file using a specific seed and 2 parallel tasks:**
 
 ```bash
-randstream generate --size 10G --seed 1a234e5678 --jobs 2 output.bin
+randstream generate --size 10G --seed 12345678 --jobs 2 output.bin
 ```
 
 **Validate a previously generated stream:**
