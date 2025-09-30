@@ -10,7 +10,8 @@ use rand_pcg::Pcg64Mcg;
 use std::fs::OpenOptions;
 use std::io::{self, Seek as _, Write};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Instant;
 
@@ -104,37 +105,52 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
         let chunk_position = args.position / chunk_size as u64;
         let (tx, rx) = mpsc::channel::<u64>();
+        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         let handles: Vec<_> = (0..num_threads as u64)
             .map(|i| {
                 let file = file.clone();
                 let position = args.position;
                 let tx = tx.clone();
+                let cancel = cancel.clone();
                 thread::spawn(move || -> anyhow::Result<_> {
-                    let mut writer = OpenOptions::new().write(true).open(file)?;
-                    let mut thread_hasher = Hasher::new();
-                    let mut rng = Pcg64Mcg::from_seed(seed);
-                    let mut buffer = vec![0; buffer_size];
-                    let start_chunk = i * chunks_per_thread + chunk_position;
-                    let end_chunk = ((i + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
-                    writer.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
-                    rng.advance(((start_chunk * buffer_size as u64) / 8).into());
-                    let mut total_write_size: u64 = 0;
-                    let mut progress_bytes: u64 = 0;
-                    for chunk in start_chunk..end_chunk {
-                        let write_size = ((position + stream_size - (chunk * chunk_size as u64))
-                            as usize)
-                            .min(chunk_size);
-                        generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher);
-                        writer.write_all(&buffer[..write_size])?;
-                        total_write_size += write_size as u64;
-                        progress_bytes += write_size as u64;
-                        if chunk % 100 == 0 {
-                            tx.send(progress_bytes)?;
-                            progress_bytes = 0;
+                    let run = || {
+                        let mut writer = OpenOptions::new().write(true).open(file)?;
+                        let mut thread_hasher = Hasher::new();
+                        let mut rng = Pcg64Mcg::from_seed(seed);
+                        let mut buffer = vec![0; buffer_size];
+                        let start_chunk = i * chunks_per_thread + chunk_position;
+                        let end_chunk =
+                            ((i + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
+                        writer.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
+                        rng.advance(((start_chunk * buffer_size as u64) / 8).into());
+                        let mut total_write_size: u64 = 0;
+                        let mut progress_bytes: u64 = 0;
+                        for chunk in start_chunk..end_chunk {
+                            let write_size =
+                                ((position + stream_size - (chunk * chunk_size as u64)) as usize)
+                                    .min(chunk_size);
+                            generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher);
+                            writer.write_all(&buffer[..write_size])?;
+                            total_write_size += write_size as u64;
+                            progress_bytes += write_size as u64;
+                            if chunk % 100 == 0 {
+                                tx.send(progress_bytes)?;
+                                progress_bytes = 0;
+                            }
+                            if cancel.load(Ordering::Relaxed) {
+                                // just quit early
+                                return Ok((total_write_size, thread_hasher));
+                            }
                         }
+                        Ok((total_write_size, thread_hasher))
+                    };
+                    let result = run();
+                    if result.is_err() {
+                        // tell the other thread to stop there
+                        cancel.store(true, Ordering::Relaxed);
                     }
-                    Ok((total_write_size, thread_hasher))
+                    result
                 })
             })
             .collect();
