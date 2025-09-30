@@ -203,7 +203,7 @@ fn generate_chunk(
         let checksum_bytes = hasher.finalize().to_le_bytes();
         let end_slice = &mut buffer[write_size - 4..write_size];
         end_slice.copy_from_slice(&checksum_bytes);
-        global_hasher.update(&checksum_bytes);
+        // global_hasher.update(&checksum_bytes);
     } else {
         // not enough room to fit the checksum, just push some zeros in there
         buffer[..write_size].fill(0);

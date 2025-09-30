@@ -188,7 +188,7 @@ fn validate_chunk(chunk: u64, buffer: &[u8], global_hasher: &mut Hasher) -> anyh
     if read_size >= 4 {
         hasher.update(&buffer[..read_size - 4]);
         global_hasher.combine(&hasher);
-        global_hasher.update(&buffer[read_size - 4..read_size]);
+        // global_hasher.update(&buffer[read_size - 4..read_size]);
         let stream_checksum =
             u32::from_le_bytes(buffer[read_size - 4..read_size].try_into().unwrap());
         let checksum = hasher.finalize();
