@@ -18,14 +18,30 @@ mod blk {
     ioctl_read!(blkgetsize64, 0x12, 114, u64);
 }
 
+#[cfg(target_os = "freebsd")]
+mod blk {
+    use nix::ioctl_read;
+    ioctl_read!(diocgmediasize, b'd', 129, u64);
+}
+
 pub fn read_file_size(path: &Path) -> anyhow::Result<u64> {
     let file_type = std::fs::metadata(path)?.file_type();
-    if file_type.is_block_device() {
+    if file_type.is_block_device() || file_type.is_char_device() {
         let file = File::open(path)?;
         let fd = file.as_raw_fd();
+
+        #[cfg(target_os = "linux")]
         unsafe {
             let mut size: u64 = 0;
             blk::blkgetsize64(fd, &mut size).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+            Ok(size)
+        }
+
+        #[cfg(target_os = "freebsd")]
+        unsafe {
+            let mut size: u64 = 0;
+            blk::diocgmediasize(fd, &mut size)
+                .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
             Ok(size)
         }
     } else {
