@@ -1,4 +1,6 @@
+use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd as _;
 use std::sync::mpsc::{Receiver, Sender};
 use std::{io::Read, os::unix::fs::FileTypeExt, path::Path};
 
@@ -10,19 +12,24 @@ pub mod cli;
 pub mod generate;
 pub mod validate;
 
-pub fn read_file_size(file: &Path) -> anyhow::Result<u64> {
-    let file_type = std::fs::metadata(file)?.file_type();
+#[cfg(target_os = "linux")]
+mod blk {
+    use nix::ioctl_read;
+    ioctl_read!(blkgetsize64, 0x12, 114, u64);
+}
+
+pub fn read_file_size(path: &Path) -> anyhow::Result<u64> {
+    let file_type = std::fs::metadata(path)?.file_type();
     if file_type.is_block_device() {
-        let basename = file.file_name().unwrap().display();
-        let size: u64 =
-            std::fs::read_to_string(format!("/sys/block/{basename}/size"))?.trim().parse()?;
-        let block_size: u64 =
-            std::fs::read_to_string(format!("/sys/block/{basename}/queue/physical_block_size"))?
-                .trim()
-                .parse()?;
-        Ok(size * block_size)
+        let file = File::open(path)?;
+        let fd = file.as_raw_fd();
+        unsafe {
+            let mut size: u64 = 0;
+            blk::blkgetsize64(fd, &mut size).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+            Ok(size)
+        }
     } else {
-        Ok(file.metadata()?.len())
+        Ok(path.metadata()?.len())
     }
 }
 
