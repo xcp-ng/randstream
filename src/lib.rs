@@ -67,7 +67,11 @@ fn set_up_progress_bar(stream_size: Option<u64>) -> anyhow::Result<ProgressBar> 
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
         )?
-        .progress_chars("=> "),
+        .progress_chars(if supports_unicode::on(supports_unicode::Stream::Stdout) {
+            "█▉▊▋▌▍▎▏  "
+        } else {
+            "=> "
+        }),
     );
     Ok(pb)
 }
