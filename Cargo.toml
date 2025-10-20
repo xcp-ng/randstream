@@ -13,7 +13,7 @@ keywords = ["random", "performance", "stream"]
 
 [dependencies]
 anyhow = "1.0.100"
-clap = { version = "4.5.13", features = ["derive", "env", "wrap_help"] }
+clap = { version = "4.5.49", features = ["derive", "env", "wrap_help"] }
 clap-verbosity-flag = "3.0.4"
 crc32fast = "1.5.0"
 human-units = "0.5.3"
