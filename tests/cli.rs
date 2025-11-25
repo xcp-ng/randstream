@@ -3,27 +3,13 @@ use std::process::Command;
 #[test]
 fn test_generate_validate() {
     let output = Command::new(env!("CARGO_BIN_EXE_randstream"))
-        .args([
-            "generate",
-            "--size",
-            "1M",
-            "--chunk-size",
-            "1K",
-            "--seed",
-            "1234",
-            "test.bin",
-        ])
+        .args(["generate", "--size", "1M", "--chunk-size", "1K", "--seed", "1234", "test.bin"])
         .output()
         .expect("failed to execute generate process");
     assert!(output.status.success());
 
     let output = Command::new(env!("CARGO_BIN_EXE_randstream"))
-        .args([
-            "validate",
-            "--chunk-size",
-            "1K",
-            "test.bin",
-        ])
+        .args(["validate", "--chunk-size", "1K", "test.bin"])
         .output()
         .expect("failed to execute validate process");
 
