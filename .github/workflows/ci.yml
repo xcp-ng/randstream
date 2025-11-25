@@ -38,6 +38,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
 
           # release platforms
+          - build: windows-amd64
+            os: windows-latest
+            rust: stable
+            target: x86_64-pc-windows-msvc
           - build: linux-amd64
             os: ubuntu-24.04
             rust: stable
