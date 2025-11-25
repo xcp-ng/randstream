@@ -6,8 +6,8 @@ cases such as verifying storage integrity, benchmarking I/O performance, or
 generating large, arbitrary datasets for testing.
 
 The utility uses a **seed** to ensure that the generated data is reproducible.
-In order to be validatable without regeneration on the data, the stream includes
-a **checksum** of 4 bytes at the end of each chunk.
+In order to be validatable without regeneration on the data, the stream is processed in chunks (32KB by default), and each chunk includes
+a **checksum** of 4 bytes at its end for integrity verification.
 It also uses **parallel processing** to ensure maximum throughput on modern
 hardware, while keeping the output identical independently of the number of
 parallel tasks.
