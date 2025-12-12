@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use clap::{Args, arg, command};
+use clap::Args;
 use crc32fast::Hasher;
 use human_units::{FormatDuration as _, FormatSize as _};
 use itertools::Itertools as _;
