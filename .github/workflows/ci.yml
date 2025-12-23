@@ -28,24 +28,40 @@ jobs:
             os: ubuntu-24.04
             rust: stable
             target: x86_64-unknown-linux-gnu
+            cargo: cargo
+            run: true
           - build: beta
             os: ubuntu-24.04
             rust: beta
             target: x86_64-unknown-linux-gnu
+            cargo: cargo
+            run: true
           - build: nightly
             os: ubuntu-24.04
             rust: nightly
             target: x86_64-unknown-linux-gnu
+            cargo: cargo
+            run: true
 
           # release platforms
           - build: linux-amd64
             os: ubuntu-24.04
             rust: stable
             target: x86_64-unknown-linux-musl
+            cargo: cargo
+            run: true
           - build: linux-arm64
             os: ubuntu-24.04-arm
             rust: stable
             target: aarch64-unknown-linux-musl
+            cargo: cargo
+            run: true
+          - build: freebsd-amd64
+            os: ubuntu-24.04
+            rust: stable
+            target: x86_64-unknown-freebsd
+            cargo: cross
+            run: false
     steps:
     - uses: actions/checkout@v4
       with:
@@ -54,9 +70,19 @@ jobs:
       with:
         toolchain: ${{ matrix.rust }}
         target: ${{ matrix.target }}
-    - run: cargo build --workspace --target ${{ matrix.target }}
-    - run: cargo run --target ${{ matrix.target }} -- --help
-    - run: cargo test --workspace --target ${{ matrix.target }}
+    - if: matrix.cargo == 'cross'
+      run: |
+        dir="$RUNNER_TEMP/cross-download"
+        mkdir "$dir"
+        echo "$dir" >> $GITHUB_PATH
+        cd "$dir"
+        curl -LO "https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz"
+        tar xf cross-x86_64-unknown-linux-musl.tar.gz
+    - run: ${{ matrix.cargo }} build --workspace --target ${{ matrix.target }}
+    - if: ${{ matrix.run }}
+      run: ${{ matrix.cargo }} run --target ${{ matrix.target }} -- --help
+    - if: ${{ matrix.run }}
+      run: ${{ matrix.cargo }} test --workspace --target ${{ matrix.target }}
       env:
         NO_COLOR: "true"
 
