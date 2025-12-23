@@ -60,5 +60,5 @@ randstream generate --size 10G --seed 12345678 --jobs 2 output.bin
 **Validate a previously generated stream:**
 
 ```bash
-randstream generate output.bin
+randstream validate output.bin
 ```
