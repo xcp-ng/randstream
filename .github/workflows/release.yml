@@ -71,10 +71,17 @@ jobs:
             os: ubuntu-latest
             rust: stable
             target: x86_64-unknown-linux-musl
+            cargo: cargo
           - build: linux-arm64
             os: ubuntu-24.04-arm
             rust: stable
             target: aarch64-unknown-linux-musl
+            cargo: cargo
+          - build: freebsd-amd64
+            os: ubuntu-24.04
+            rust: stable
+            target: x86_64-unknown-freebsd
+            cargo: cross
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,10 +91,19 @@ jobs:
           toolchain: ${{ matrix.rust }}
           target: ${{ matrix.target }}
 
+      - if: matrix.cargo == 'cross'
+        run: |
+          dir="$RUNNER_TEMP/cross-download"
+          mkdir "$dir"
+          echo "$dir" >> $GITHUB_PATH
+          cd "$dir"
+          curl -LO "https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz"
+          tar xf cross-x86_64-unknown-linux-musl.tar.gz
+
       - name: Build release binary
         shell: bash
         run: |
-          cargo build --workspace --target ${{ matrix.target }} --release
+          ${{ matrix.cargo }} build --workspace --target ${{ matrix.target }} --release
           echo "BIN=$PWD/target/${{ matrix.target }}/release/randstream" >> $GITHUB_ENV
 
       - name: Get the release version from the tag
