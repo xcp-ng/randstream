@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
 use human_units::{FormatDuration as _, FormatSize as _};
+use indicatif::ProgressBar;
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
@@ -55,23 +56,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
             args.position
         ));
     }
-    let stream_size = if let Some(size) = &args.common.size {
-        *size
-    } else if let Some(file) = &args.file
-        && file.exists()
-    {
-        let size = read_file_size(file)?;
-        if args.position > size {
-            return Err(anyhow!(
-                "The position {} is greater than the file size {size}",
-                args.position
-            ));
-        }
-        size - args.position
-    } else {
-        return Err(anyhow!("Size can't be determined. Use --size to provide a stream size."));
-    };
-
+    let stream_size = resolve_stream_size(args)?;
     let pb =
         (!args.common.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
 
@@ -81,103 +66,11 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     debug!("seed: {}", args.seed);
 
     let (bytes_generated, checksum) = if let Some(file) = &args.file {
-        {
-            // make sure the output file exists, before opening it in the threads
-            let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
-            // and that the file size matches the requested size
-            if file.is_file() {
-                let end_position = stream_size + args.position;
-                if end_position > file.metadata()?.len() || !args.no_truncate {
-                    f.set_len(end_position)?;
-                }
-            }
-        }
-        let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
-        debug!("number of threads: {num_threads}");
-        let num_chunks = stream_size.div_ceil(chunk_size as u64);
-        let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
-        let chunk_position = args.position / chunk_size as u64;
-        let (tx, rx) = mpsc::channel::<u64>();
-        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-
-        let handles: Vec<_> = (0..num_threads as u64)
-            .map(|i| {
-                let seed = args.seed;
-                let file = file.clone();
-                let position = args.position;
-                let tx = tx.clone();
-                let cancel = cancel.clone();
-                thread::spawn(move || -> anyhow::Result<_> {
-                    let run = || {
-                        let mut writer = OpenOptions::new().write(true).open(file)?;
-                        let mut thread_hasher = Hasher::new();
-                        let mut rng = Pcg64Mcg::seed_from_u64(seed);
-                        let mut buffer = vec![0; buffer_size];
-                        let start_chunk = i * chunks_per_thread + chunk_position;
-                        let end_chunk =
-                            ((i + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
-                        writer.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
-                        rng.advance(((start_chunk * buffer_size as u64) / 8).into());
-                        let mut total_write_size: u64 = 0;
-                        let mut progress_bytes: u64 = 0;
-                        for chunk in start_chunk..end_chunk {
-                            let write_size =
-                                ((position + stream_size - (chunk * chunk_size as u64)) as usize)
-                                    .min(chunk_size);
-                            generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher);
-                            writer.write_all(&buffer[..write_size])?;
-                            total_write_size += write_size as u64;
-                            progress_bytes += write_size as u64;
-                            if chunk % 100 == 0 {
-                                tx.send(progress_bytes)?;
-                                progress_bytes = 0;
-                            }
-                            if cancel.load(Ordering::Relaxed) {
-                                // just quit early
-                                return Ok((total_write_size, thread_hasher));
-                            }
-                        }
-                        Ok((total_write_size, thread_hasher))
-                    };
-                    let result = run();
-                    if result.is_err() {
-                        // tell the other thread to stop there
-                        cancel.store(true, Ordering::Relaxed);
-                    }
-                    result
-                })
-            })
-            .collect();
-        receive_progress(&pb, &rx, tx);
-        let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
-
-        let write_bytes = thread_data.iter().map(|(b, _)| b).sum();
-
-        let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
-        let mut hasher = thread_hashers[0].clone();
-        for partial_hasher in thread_hashers[1..].iter() {
-            hasher.combine(partial_hasher)
-        }
-
-        (write_bytes, hasher.finalize())
+        generate_to_file(args, file, stream_size, chunk_size, buffer_size, &pb)?
     } else {
-        debug!("number of threads: 1");
-        let mut writer = io::stdout();
-        let mut rng = Pcg64Mcg::seed_from_u64(args.seed);
-        let mut buffer = vec![0u8; chunk_size];
-        let mut bytes_generated: u64 = 0;
-        let mut hasher = Hasher::new();
-        while bytes_generated < stream_size {
-            let write_size = (stream_size - bytes_generated).min(chunk_size as u64) as usize;
-            generate_chunk(&mut rng, &mut buffer, write_size, &mut hasher);
-            writer.write_all(&buffer[..write_size])?;
-            bytes_generated += write_size as u64;
-            if let Some(pb) = &pb {
-                pb.set_position(bytes_generated);
-            }
-        }
-        (bytes_generated, hasher.finalize())
+        generate_to_stdout(args, stream_size, chunk_size, &pb)?
     };
+
     info!("checksum: {checksum:08x}");
     debug!("written bytes: {bytes_generated}");
     debug!(
@@ -187,6 +80,162 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     );
     debug!("run in {}", start.elapsed().format_duration());
     Ok(0)
+}
+
+fn resolve_stream_size(args: &GenerateArgs) -> anyhow::Result<u64> {
+    if let Some(size) = &args.common.size {
+        return Ok(*size);
+    }
+    if let Some(file) = &args.file
+        && file.exists()
+    {
+        let size = read_file_size(file)?;
+        if args.position > size {
+            return Err(anyhow!(
+                "The position {} is greater than the file size {size}",
+                args.position
+            ));
+        }
+        return Ok(size - args.position);
+    }
+    Err(anyhow!("Size can't be determined. Use --size to provide a stream size."))
+}
+
+fn generate_to_file(
+    args: &GenerateArgs,
+    file: &PathBuf,
+    stream_size: u64,
+    chunk_size: usize,
+    buffer_size: usize,
+    pb: &Option<ProgressBar>,
+) -> anyhow::Result<(u64, u32)> {
+    // make sure the output file exists, before opening it in the threads
+    let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
+    // and that the file size matches the requested size
+    if file.is_file() {
+        let end_position = stream_size + args.position;
+        if end_position > f.metadata()?.len() || !args.no_truncate {
+            f.set_len(end_position)?;
+        }
+    }
+
+    let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
+    debug!("number of threads: {num_threads}");
+    let num_chunks = stream_size.div_ceil(chunk_size as u64);
+    let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
+    let chunk_position = args.position / chunk_size as u64;
+    let (tx, rx) = mpsc::channel::<u64>();
+    let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    let handles: Vec<_> = (0..num_threads as u64)
+        .map(|i| {
+            let seed = args.seed;
+            let file = file.clone();
+            let position = args.position;
+            let tx = tx.clone();
+            let cancel = cancel.clone();
+            thread::spawn(move || -> anyhow::Result<_> {
+                let result = write_chunk_range(
+                    &file,
+                    seed,
+                    position,
+                    stream_size,
+                    chunk_size,
+                    buffer_size,
+                    i,
+                    chunks_per_thread,
+                    num_chunks,
+                    chunk_position,
+                    &tx,
+                    &cancel,
+                );
+                if result.is_err() {
+                    // tell the other threads to stop
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                result
+            })
+        })
+        .collect();
+
+    receive_progress(pb, &rx, tx);
+    let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
+
+    let write_bytes = thread_data.iter().map(|(b, _)| b).sum();
+    let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
+    let mut hasher = thread_hashers[0].clone();
+    for partial_hasher in thread_hashers[1..].iter() {
+        hasher.combine(partial_hasher);
+    }
+
+    Ok((write_bytes, hasher.finalize()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_chunk_range(
+    file: &PathBuf,
+    seed: u64,
+    position: u64,
+    stream_size: u64,
+    chunk_size: usize,
+    buffer_size: usize,
+    thread_index: u64,
+    chunks_per_thread: u64,
+    num_chunks: u64,
+    chunk_position: u64,
+    tx: &mpsc::Sender<u64>,
+    cancel: &AtomicBool,
+) -> anyhow::Result<(u64, Hasher)> {
+    let mut writer = OpenOptions::new().write(true).open(file)?;
+    let mut thread_hasher = Hasher::new();
+    let mut rng = Pcg64Mcg::seed_from_u64(seed);
+    let mut buffer = vec![0; buffer_size];
+    let start_chunk = thread_index * chunks_per_thread + chunk_position;
+    let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
+    writer.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
+    rng.advance(((start_chunk * buffer_size as u64) / 8).into());
+    let mut total_write_size: u64 = 0;
+    let mut progress_bytes: u64 = 0;
+    for chunk in start_chunk..end_chunk {
+        let write_size =
+            ((position + stream_size - (chunk * chunk_size as u64)) as usize).min(chunk_size);
+        generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher);
+        writer.write_all(&buffer[..write_size])?;
+        total_write_size += write_size as u64;
+        progress_bytes += write_size as u64;
+        if chunk % 100 == 0 {
+            tx.send(progress_bytes)?;
+            progress_bytes = 0;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Ok((total_write_size, thread_hasher));
+        }
+    }
+    Ok((total_write_size, thread_hasher))
+}
+
+fn generate_to_stdout(
+    args: &GenerateArgs,
+    stream_size: u64,
+    chunk_size: usize,
+    pb: &Option<ProgressBar>,
+) -> anyhow::Result<(u64, u32)> {
+    debug!("number of threads: 1");
+    let mut writer = io::stdout();
+    let mut rng = Pcg64Mcg::seed_from_u64(args.seed);
+    let mut buffer = vec![0u8; chunk_size];
+    let mut bytes_generated: u64 = 0;
+    let mut hasher = Hasher::new();
+    while bytes_generated < stream_size {
+        let write_size = (stream_size - bytes_generated).min(chunk_size as u64) as usize;
+        generate_chunk(&mut rng, &mut buffer, write_size, &mut hasher);
+        writer.write_all(&buffer[..write_size])?;
+        bytes_generated += write_size as u64;
+        if let Some(pb) = pb {
+            pb.set_position(bytes_generated);
+        }
+    }
+    Ok((bytes_generated, hasher.finalize()))
 }
 
 fn generate_chunk(
