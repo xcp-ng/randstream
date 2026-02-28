@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
 use human_units::{FormatDuration, FormatSize as _};
+use indicatif::ProgressBar;
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
@@ -52,118 +53,31 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
             args.position
         ));
     }
+
     let (bytes_validated, checksum) = if let Some(file) = &args.file {
-        let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
-        let stream_size: u64 = if let Some(size) = &args.common.size {
-            *size
-        } else {
-            let size = read_file_size(file)?;
-            if args.position > size {
-                return Err(anyhow!(
-                    "The position {} is greater than the file size {size}",
-                    args.position
-                ));
-            }
-            size - args.position
-        };
+        let stream_size = resolve_stream_size(args, file)?;
         let pb = (!args.common.no_progress)
             .then_some(set_up_progress_bar(Some(stream_size)))
             .transpose()?;
 
         debug!("position: {}", args.position);
         debug!("stream size: {stream_size}");
-        debug!("number of threads: {num_threads}");
         debug!("chunk size: {chunk_size}");
 
-        let num_chunks = stream_size.div_ceil(chunk_size as u64);
-        let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
-        let chunk_position = args.position / chunk_size as u64;
-        let (tx, rx) = mpsc::channel::<u64>();
-        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-
-        let handles: Vec<_> = (0..num_threads as u64)
-            .map(|i| {
-                let file = file.clone();
-                let tx = tx.clone();
-                let cancel = cancel.clone();
-                thread::spawn(move || -> anyhow::Result<_> {
-                    let run = || {
-                        let mut file = File::open(file)?;
-                        let mut thread_hasher = Hasher::new();
-                        let start_chunk = i * chunks_per_thread + chunk_position;
-                        let end_chunk =
-                            ((i + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
-                        let mut buffer = vec![0; chunk_size];
-                        file.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
-                        let mut total_read_size: u64 = 0;
-                        let mut progress_bytes: u64 = 0;
-                        for chunk in start_chunk..end_chunk {
-                            let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
-                            validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
-                            total_read_size += read_size as u64;
-                            progress_bytes += read_size as u64;
-                            if chunk % 100 == 0 {
-                                tx.send(progress_bytes)?;
-                                progress_bytes = 0;
-                            }
-                            if cancel.load(Ordering::Relaxed) {
-                                // just quit early
-                                return Ok((total_read_size, thread_hasher));
-                            }
-                        }
-                        Ok((total_read_size, thread_hasher))
-                    };
-                    let result = run();
-                    if result.is_err() {
-                        // tell the other thread to stop there
-                        cancel.store(true, Ordering::Relaxed);
-                    }
-                    result
-                })
-            })
-            .collect();
-        receive_progress(&pb, &rx, tx);
-        let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
-
-        let read_bytes = thread_data.iter().map(|(b, _)| b).sum();
-
-        let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
-        let mut hasher = thread_hashers[0].clone();
-        for partial_hasher in thread_hashers[1..].iter() {
-            hasher.combine(partial_hasher)
-        }
-
-        (read_bytes, hasher.finalize())
+        validate_from_file(args, file, stream_size, chunk_size, &pb)?
     } else {
+        let pb = (!args.common.no_progress).then_some(set_up_progress_bar(None)).transpose()?;
+
         debug!("position: {}", args.position);
         debug!(
             "stream size: {}",
             if let Some(size) = args.common.size { size.to_string() } else { "∞".to_string() }
         );
-        debug!("number of threads: 1");
         debug!("chunk size: {chunk_size}");
-        // discard the first values up to position
-        io::copy(&mut io::stdin().take(args.position), &mut io::sink())?;
-        let mut buffer = vec![0; chunk_size];
-        let mut stream_size: u64 = 0;
-        let mut chunk: u64 = args.position / chunk_size as u64;
-        let mut hasher = Hasher::new();
-        let pb = (!args.common.no_progress).then_some(set_up_progress_bar(None)).transpose()?;
-        while args.common.size.map(|s| stream_size < s).unwrap_or(true) {
-            let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
-            if read_size == 0 {
-                // End of input stream (EOF)
-                break;
-            }
-            validate_chunk(chunk, &buffer[..read_size], &mut hasher)?;
-            stream_size += read_size as u64;
-            chunk += 1;
-            if let Some(pb) = &pb {
-                pb.set_position(stream_size);
-            }
-        }
-        (stream_size, hasher.finalize())
+
+        validate_from_stdin(args, chunk_size, &pb)?
     };
+
     if let Some(expected_checksum) = &args.expected_checksum
         && expected_checksum != &format!("{checksum:08x}")
     {
@@ -180,6 +94,134 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     );
     debug!("run in {}", start.elapsed().format_duration());
     Ok(0)
+}
+
+fn resolve_stream_size(args: &ValidateArgs, file: &PathBuf) -> anyhow::Result<u64> {
+    if let Some(size) = &args.common.size {
+        return Ok(*size);
+    }
+    let size = read_file_size(file)?;
+    if args.position > size {
+        return Err(anyhow!("The position {} is greater than the file size {size}", args.position));
+    }
+    Ok(size - args.position)
+}
+
+fn validate_from_file(
+    args: &ValidateArgs,
+    file: &PathBuf,
+    stream_size: u64,
+    chunk_size: usize,
+    pb: &Option<ProgressBar>,
+) -> anyhow::Result<(u64, u32)> {
+    let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
+    debug!("number of threads: {num_threads}");
+
+    let num_chunks = stream_size.div_ceil(chunk_size as u64);
+    let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
+    let chunk_position = args.position / chunk_size as u64;
+    let (tx, rx) = mpsc::channel::<u64>();
+    let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    let handles: Vec<_> = (0..num_threads as u64)
+        .map(|i| {
+            let file = file.clone();
+            let tx = tx.clone();
+            let cancel = cancel.clone();
+            thread::spawn(move || -> anyhow::Result<_> {
+                let result = validate_chunk_range(
+                    &file,
+                    chunk_size,
+                    i,
+                    chunks_per_thread,
+                    num_chunks,
+                    chunk_position,
+                    &tx,
+                    &cancel,
+                );
+                if result.is_err() {
+                    // tell the other threads to stop
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                result
+            })
+        })
+        .collect();
+
+    receive_progress(pb, &rx, tx);
+    let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
+
+    let read_bytes = thread_data.iter().map(|(b, _)| b).sum();
+    let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
+    let mut hasher = thread_hashers[0].clone();
+    for partial_hasher in thread_hashers[1..].iter() {
+        hasher.combine(partial_hasher);
+    }
+
+    Ok((read_bytes, hasher.finalize()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_chunk_range(
+    file: &PathBuf,
+    chunk_size: usize,
+    thread_index: u64,
+    chunks_per_thread: u64,
+    num_chunks: u64,
+    chunk_position: u64,
+    tx: &mpsc::Sender<u64>,
+    cancel: &AtomicBool,
+) -> anyhow::Result<(u64, Hasher)> {
+    let mut file = File::open(file)?;
+    let mut thread_hasher = Hasher::new();
+    let start_chunk = thread_index * chunks_per_thread + chunk_position;
+    let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
+    let mut buffer = vec![0; chunk_size];
+    file.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
+    let mut total_read_size: u64 = 0;
+    let mut progress_bytes: u64 = 0;
+    for chunk in start_chunk..end_chunk {
+        let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
+        validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
+        total_read_size += read_size as u64;
+        progress_bytes += read_size as u64;
+        if chunk % 100 == 0 {
+            tx.send(progress_bytes)?;
+            progress_bytes = 0;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Ok((total_read_size, thread_hasher));
+        }
+    }
+    Ok((total_read_size, thread_hasher))
+}
+
+fn validate_from_stdin(
+    args: &ValidateArgs,
+    chunk_size: usize,
+    pb: &Option<ProgressBar>,
+) -> anyhow::Result<(u64, u32)> {
+    debug!("number of threads: 1");
+    // discard the first values up to position
+    io::copy(&mut io::stdin().take(args.position), &mut io::sink())?;
+    let mut buffer = vec![0; chunk_size];
+    let mut stream_size: u64 = 0;
+    let mut chunk: u64 = args.position / chunk_size as u64;
+    let mut hasher = Hasher::new();
+    while args.common.size.map(|s| stream_size < s).unwrap_or(true) {
+        let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
+        if read_size == 0 {
+            // End of input stream (EOF)
+            break;
+        }
+        validate_chunk(chunk, &buffer[..read_size], &mut hasher)?;
+        stream_size += read_size as u64;
+        chunk += 1;
+        if let Some(pb) = pb {
+            pb.set_position(stream_size);
+        }
+    }
+    Ok((stream_size, hasher.finalize()))
 }
 
 fn validate_chunk(chunk: u64, buffer: &[u8], global_hasher: &mut Hasher) -> anyhow::Result<()> {
