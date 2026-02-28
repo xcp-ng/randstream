@@ -224,7 +224,7 @@ fn validate_from_stdin(
     Ok((stream_size, hasher.finalize()))
 }
 
-fn validate_chunk(chunk: u64, buffer: &[u8], global_hasher: &mut Hasher) -> anyhow::Result<()> {
+pub fn validate_chunk(chunk: u64, buffer: &[u8], global_hasher: &mut Hasher) -> anyhow::Result<()> {
     let mut hasher = Hasher::new();
     let read_size = buffer.len();
     if read_size >= 4 {

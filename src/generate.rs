@@ -239,7 +239,7 @@ fn generate_to_stdout(
     Ok((bytes_generated, hasher.finalize()))
 }
 
-fn generate_chunk(
+pub fn generate_chunk(
     rng: &mut Pcg64Mcg,
     buffer: &mut [u8],
     write_size: usize,
