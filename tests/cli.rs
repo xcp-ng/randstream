@@ -531,17 +531,18 @@ fn round_trip_various_sizes_and_seeds() {
         chunk_size: &'static str,
         seed: &'static str,
         jobs: &'static str,
+        checksum: &'static str,
     }
     let cases = [
-        Case { size: "1Ki", chunk_size: "1Ki", seed: "0", jobs: "1" },
-        Case { size: "32Ki", chunk_size: "32Ki", seed: "1", jobs: "1" },
+        Case { size: "1Ki", chunk_size: "1Ki", seed: "0", jobs: "1", checksum: "48181a23" },
+        Case { size: "32Ki", chunk_size: "32Ki", seed: "1", jobs: "1", checksum: "855bfcd1" },
         // size not a multiple of chunk_size (tail chunk is smaller)
-        Case { size: "33Ki", chunk_size: "32Ki", seed: "2", jobs: "1" },
-        Case { size: "64Ki", chunk_size: "32Ki", seed: "3", jobs: "2" },
-        Case { size: "256Ki", chunk_size: "64Ki", seed: "99", jobs: "3" },
-        Case { size: "1Mi", chunk_size: "32Ki", seed: "12345", jobs: "1" },
+        Case { size: "33Ki", chunk_size: "32Ki", seed: "2", jobs: "1", checksum: "aa0e5a26" },
+        Case { size: "64Ki", chunk_size: "32Ki", seed: "3", jobs: "2", checksum: "5af3b3b3" },
+        Case { size: "256Ki", chunk_size: "64Ki", seed: "99", jobs: "3", checksum: "48bdc095" },
+        Case { size: "1Mi", chunk_size: "32Ki", seed: "12345", jobs: "1", checksum: "9e904c23" },
         // same data, different thread count – checksums must be identical
-        Case { size: "1Mi", chunk_size: "32Ki", seed: "12345", jobs: "4" },
+        Case { size: "1Mi", chunk_size: "32Ki", seed: "12345", jobs: "4", checksum: "9e904c23" },
     ];
 
     for case in &cases {
@@ -577,7 +578,18 @@ fn round_trip_various_sizes_and_seeds() {
             String::from_utf8_lossy(&v.stderr)
         );
 
-        assert_eq!(parse_checksum(&g), parse_checksum(&v), "checksum mismatch for {label}");
+        let g_checksum = parse_checksum(&g);
+        let v_checksum = parse_checksum(&v);
+        assert_eq!(
+            g_checksum, case.checksum,
+            "generate checksum changed for {label}: got {g_checksum}, expected {}",
+            case.checksum
+        );
+        assert_eq!(
+            v_checksum, case.checksum,
+            "validate checksum changed for {label}: got {v_checksum}, expected {}",
+            case.checksum
+        );
     }
 }
 
