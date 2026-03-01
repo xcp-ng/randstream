@@ -8,7 +8,7 @@ use log::{debug, info};
 use parse_size::parse_size;
 use std::fs::File;
 use std::io::{self, Read, Seek};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -96,7 +96,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn resolve_stream_size(args: &ValidateArgs, file: &PathBuf) -> anyhow::Result<u64> {
+fn resolve_stream_size(args: &ValidateArgs, file: &Path) -> anyhow::Result<u64> {
     if let Some(size) = &args.common.size {
         return Ok(*size);
     }
@@ -109,7 +109,7 @@ fn resolve_stream_size(args: &ValidateArgs, file: &PathBuf) -> anyhow::Result<u6
 
 fn validate_from_file(
     args: &ValidateArgs,
-    file: &PathBuf,
+    file: &Path,
     stream_size: u64,
     chunk_size: usize,
     pb: &Option<ProgressBar>,
@@ -125,7 +125,7 @@ fn validate_from_file(
 
     let handles: Vec<_> = (0..num_threads as u64)
         .map(|i| {
-            let file = file.clone();
+            let file = file.to_path_buf();
             let tx = tx.clone();
             let cancel = cancel.clone();
             thread::spawn(move || -> anyhow::Result<_> {
@@ -163,7 +163,7 @@ fn validate_from_file(
 
 #[allow(clippy::too_many_arguments)]
 fn validate_chunk_range(
-    file: &PathBuf,
+    file: &Path,
     chunk_size: usize,
     thread_index: u64,
     chunks_per_thread: u64,
