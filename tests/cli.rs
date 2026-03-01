@@ -411,16 +411,17 @@ fn validate_detects_truncated_file() {
 #[test]
 fn validate_stdin_passes_for_valid_stream() {
     // Generate to stdout, pipe into validate stdin.
-    let generator = bin()
+    let mut generator = bin()
         .args(["generate", "--no-progress", "--size", "64Ki", "--seed", "7"])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     let val = bin()
         .args(["validate", "--no-progress"])
-        .stdin(generator.stdout.unwrap())
+        .stdin(generator.stdout.take().unwrap())
         .output()
         .unwrap();
+    generator.wait().unwrap();
     assert!(val.status.success(), "{}", String::from_utf8_lossy(&val.stderr));
 }
 
