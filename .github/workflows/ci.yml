@@ -63,7 +63,7 @@ jobs:
             cargo: cross
             run: false
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         persist-credentials: false
     - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
@@ -89,7 +89,7 @@ jobs:
   rustfmt:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         persist-credentials: false
     - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
@@ -101,7 +101,7 @@ jobs:
   clippy:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         persist-credentials: false
     - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
@@ -134,7 +134,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
-      # FIXME: unpin once zizmor stops complaining about untrusted publishing
-      - run: uvx zizmor@1.13.0 .
+      - run: uvx zizmor .
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
