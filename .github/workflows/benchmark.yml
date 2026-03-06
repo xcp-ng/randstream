@@ -28,7 +28,7 @@ jobs:
         with:
           toolchain: stable
 
-      - run: curl --proto '=https' --tlsv1.2 -sSf https://bencher.dev/install.sh | bash
+      - run: curl --proto '=https' --tlsv1.2 -sSfL https://bencher.dev/download/install-cli.sh | sh
 
       - run: |
           ~/.bencher/bencher run \
