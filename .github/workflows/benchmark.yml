@@ -28,10 +28,10 @@ jobs:
         with:
           toolchain: stable
 
-      - run: curl --proto '=https' --tlsv1.2 -sSfL https://bencher.dev/download/install-cli.sh | sh
+      - uses: bencherdev/bencher@5cf72bead6e01cf7473d6ecd474c0e118ca6b858
 
       - run: |
-          ~/.cargo/bin/bencher run \
+          bencher run \
             --project randstream \
             --branch "$GITHUB_REF_NAME" \
             --testbed github-ubuntu-24.04 \
