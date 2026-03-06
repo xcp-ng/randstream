@@ -1,30 +1,23 @@
-use std::process::{Command, Stdio};
-
 use crc32fast::Hasher;
-use divan::Bencher;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::SeedableRng as _;
 use rand_pcg::Pcg64Mcg;
 use randstream::generate::generate_chunk;
 use randstream::validate::validate_chunk;
+use std::hint::black_box;
+use std::process::{Command, Stdio};
 use tempfile::TempDir;
-
-fn main() {
-    divan::main();
-}
 
 // ---------------------------------------------------------------------------
 // Binary path helper
 // ---------------------------------------------------------------------------
 
-/// The bench binary lives at `target/<profile>/deps/throughput-<hash>`.
-/// The randstream binary lives at `target/<profile>/randstream`.
-fn bin() -> Command {
-    let exe = std::env::current_exe().unwrap();
-    let profile_dir = exe.parent().unwrap().parent().unwrap();
-    let bin = profile_dir.join("randstream");
-    let mut cmd = Command::new(bin);
+/// Run randstream binary with given args.
+fn randstream(args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_randstream"));
     // Suppress the `checksum: …` info line and any other stderr output.
     cmd.stderr(Stdio::null());
+    cmd.args(args);
     cmd
 }
 
@@ -32,34 +25,54 @@ fn bin() -> Command {
 // Microbenchmarks — generate_chunk
 // ---------------------------------------------------------------------------
 
-#[divan::bench(consts = [1024, 32768, 131072])]
-fn bench_generate_chunk<const N: usize>(bencher: Bencher) {
-    let mut rng = Pcg64Mcg::seed_from_u64(0);
-    let mut buffer = vec![0u8; N];
-    let mut hasher = Hasher::new();
+fn bench_generate_chunk(c: &mut Criterion) {
+    let mut group = c.benchmark_group("generate_chunk");
 
-    bencher.bench_local(|| {
-        generate_chunk(&mut rng, &mut buffer, N, &mut hasher);
-    });
+    for chunk_size in [1024, 32768, 131072].iter() {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}B", chunk_size)),
+            chunk_size,
+            |b, &chunk_size| {
+                let mut rng = Pcg64Mcg::seed_from_u64(0);
+                let mut buffer = vec![0u8; chunk_size];
+                let mut hasher = Hasher::new();
+
+                b.iter(|| {
+                    generate_chunk(&mut rng, &mut buffer, chunk_size, &mut hasher);
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 // ---------------------------------------------------------------------------
 // Microbenchmarks — validate_chunk
 // ---------------------------------------------------------------------------
 
-#[divan::bench(consts = [1024, 32768, 131072])]
-fn bench_validate_chunk<const N: usize>(bencher: Bencher) {
-    // Pre-generate a valid chunk so validate_chunk never errors.
-    let mut rng = Pcg64Mcg::seed_from_u64(0);
-    let mut buffer = vec![0u8; N];
-    let mut hasher = Hasher::new();
-    generate_chunk(&mut rng, &mut buffer, N, &mut hasher);
-    let chunk_index: u64 = 0;
+fn bench_validate_chunk(c: &mut Criterion) {
+    let mut group = c.benchmark_group("validate_chunk");
 
-    bencher.bench_local(|| {
-        let mut h = Hasher::new();
-        validate_chunk(chunk_index, &buffer, &mut h).unwrap();
-    });
+    for chunk_size in [1024, 32768, 131072].iter() {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}B", chunk_size)),
+            chunk_size,
+            |b, &chunk_size| {
+                // Pre-generate a valid chunk so validate_chunk never errors.
+                let mut rng = Pcg64Mcg::seed_from_u64(0);
+                let mut buffer = vec![0u8; chunk_size];
+                let mut hasher = Hasher::new();
+                generate_chunk(&mut rng, &mut buffer, chunk_size, &mut hasher);
+                let chunk_index: u64 = 0;
+
+                b.iter(|| {
+                    let mut h = Hasher::new();
+                    validate_chunk(black_box(chunk_index), black_box(&buffer), &mut h).unwrap();
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -69,71 +82,108 @@ fn bench_validate_chunk<const N: usize>(bencher: Bencher) {
 const E2E_SIZE: &str = "1Gi";
 const SEED: &str = "42";
 
-fn e2e_dir() -> TempDir {
-    TempDir::new().expect("failed to create temp dir")
-}
-
-#[divan::bench(sample_count = 10)]
-fn bench_generate_file_single_thread(bencher: Bencher) {
-    let dir = e2e_dir();
+fn bench_generate_file_single_thread(c: &mut Criterion) {
+    let dir = TempDir::new().expect("failed to create temp dir");
     let out = dir.path().join("out.bin");
 
-    bencher.bench_local(|| {
-        let status = bin()
-            .args(["generate", "--no-progress", "--size", E2E_SIZE, "--seed", SEED, "--jobs", "1"])
+    c.bench_function("generate_file_single_thread", |b| {
+        b.iter(|| {
+            let status = randstream(&[
+                "generate",
+                "--no-progress",
+                "--size",
+                E2E_SIZE,
+                "--seed",
+                SEED,
+                "--jobs",
+                "1",
+            ])
             .arg(&out)
             .status()
             .expect("failed to spawn randstream");
-        assert!(status.success(), "randstream generate failed");
+            assert!(status.success(), "randstream generate failed");
+        });
     });
 }
 
-#[divan::bench(sample_count = 10)]
-fn bench_generate_file_parallel(bencher: Bencher) {
-    let dir = e2e_dir();
+fn bench_generate_file_parallel(c: &mut Criterion) {
+    let dir = TempDir::new().expect("failed to create temp dir");
     let out = dir.path().join("out.bin");
 
-    bencher.bench_local(|| {
-        let status = bin()
-            .args(["generate", "--no-progress", "--size", E2E_SIZE, "--seed", SEED])
-            .arg(&out)
-            .status()
-            .expect("failed to spawn randstream");
-        assert!(status.success(), "randstream generate failed");
+    c.bench_function("generate_file_parallel", |b| {
+        b.iter(|| {
+            let status =
+                randstream(&["generate", "--no-progress", "--size", E2E_SIZE, "--seed", SEED])
+                    .arg(&out)
+                    .status()
+                    .expect("failed to spawn randstream");
+            assert!(status.success(), "randstream generate failed");
+        });
     });
 }
 
-#[divan::bench(sample_count = 10)]
-fn bench_generate_stdout(bencher: Bencher) {
-    bencher.bench_local(|| {
-        let status = bin()
-            .args(["generate", "--no-progress", "--size", E2E_SIZE, "--seed", SEED])
-            .stdout(Stdio::null())
-            .status()
-            .expect("failed to spawn randstream");
-        assert!(status.success(), "randstream generate failed");
+fn bench_generate_stdout(c: &mut Criterion) {
+    c.bench_function("generate_stdout", |b| {
+        b.iter(|| {
+            let status =
+                randstream(&["generate", "--no-progress", "--size", E2E_SIZE, "--seed", SEED])
+                    .stdout(Stdio::null())
+                    .status()
+                    .expect("failed to spawn randstream");
+            assert!(status.success(), "randstream generate failed");
+        });
     });
 }
 
-#[divan::bench(sample_count = 10)]
-fn bench_validate_file(bencher: Bencher) {
-    let dir = e2e_dir();
+fn bench_validate_file(c: &mut Criterion) {
+    let dir = TempDir::new().expect("failed to create temp dir");
     let out = dir.path().join("out.bin");
 
     // Setup: generate the file once before timing starts.
-    let status = bin()
-        .args(["generate", "--no-progress", "--size", E2E_SIZE, "--seed", SEED, "--jobs", "1"])
-        .arg(&out)
-        .status()
-        .expect("failed to spawn randstream generate (setup)");
+    let status = randstream(&[
+        "generate",
+        "--no-progress",
+        "--size",
+        E2E_SIZE,
+        "--seed",
+        SEED,
+        "--jobs",
+        "1",
+    ])
+    .arg(&out)
+    .status()
+    .expect("failed to spawn randstream generate (setup)");
     assert!(status.success(), "setup generate failed");
 
-    bencher.bench_local(|| {
-        let status = bin()
-            .args(["validate", "--no-progress"])
-            .arg(&out)
-            .status()
-            .expect("failed to spawn randstream validate");
-        assert!(status.success(), "randstream validate failed");
+    c.bench_function("validate_file", |b| {
+        b.iter(|| {
+            let status = randstream(&["validate", "--no-progress"])
+                .arg(&out)
+                .status()
+                .expect("failed to spawn randstream validate");
+            assert!(status.success(), "randstream validate failed");
+        });
     });
 }
+
+// ---------------------------------------------------------------------------
+// Criterion groups and main
+// ---------------------------------------------------------------------------
+
+criterion_group!(
+    name = microbench;
+    config = Criterion::default();
+    targets = bench_generate_chunk, bench_validate_chunk
+);
+
+criterion_group!(
+    name = e2e;
+    config = Criterion::default().sample_size(10);
+    targets =
+        bench_generate_file_single_thread,
+        bench_generate_file_parallel,
+        bench_generate_stdout,
+        bench_validate_file
+);
+
+criterion_main!(microbench, e2e);
