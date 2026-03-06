@@ -31,7 +31,7 @@ jobs:
       - run: curl --proto '=https' --tlsv1.2 -sSfL https://bencher.dev/download/install-cli.sh | sh
 
       - run: |
-          ~/.bencher/bencher run \
+          ~/.cargo/bin/bencher run \
             --project randstream \
             --branch "$GITHUB_REF_NAME" \
             --testbed github-ubuntu-24.04 \
