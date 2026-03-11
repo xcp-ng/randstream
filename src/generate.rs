@@ -194,7 +194,11 @@ fn write_chunk_range(
     let start_chunk = thread_index * chunks_per_thread + chunk_position;
     let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
     writer.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
-    rng.advance(((start_chunk * buffer_size as u64) / 8).into());
+    let advance_amount = start_chunk
+        .checked_mul(buffer_size as u64)
+        .ok_or_else(|| anyhow!("arithmetic overflow: start_chunk * buffer_size exceeds u64 max"))?
+        / 8;
+    rng.advance(advance_amount.into());
     let mut total_write_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
     for chunk in start_chunk..end_chunk {
