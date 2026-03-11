@@ -36,9 +36,16 @@ fn bench_generate_chunk(c: &mut Criterion) {
                 let mut rng = Pcg64Mcg::seed_from_u64(0);
                 let mut buffer = vec![0u8; chunk_size];
                 let mut hasher = Hasher::new();
+                let mut local_hasher = Hasher::new();
 
                 b.iter(|| {
-                    generate_chunk(&mut rng, &mut buffer, chunk_size, &mut hasher);
+                    generate_chunk(
+                        &mut rng,
+                        &mut buffer,
+                        chunk_size,
+                        &mut hasher,
+                        &mut local_hasher,
+                    );
                 });
             },
         );
@@ -62,7 +69,8 @@ fn bench_validate_chunk(c: &mut Criterion) {
                 let mut rng = Pcg64Mcg::seed_from_u64(0);
                 let mut buffer = vec![0u8; chunk_size];
                 let mut hasher = Hasher::new();
-                generate_chunk(&mut rng, &mut buffer, chunk_size, &mut hasher);
+                let mut local_hasher = Hasher::new();
+                generate_chunk(&mut rng, &mut buffer, chunk_size, &mut hasher, &mut local_hasher);
                 let chunk_index: u64 = 0;
 
                 b.iter(|| {

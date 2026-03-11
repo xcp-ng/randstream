@@ -189,6 +189,7 @@ fn write_chunk_range(
 ) -> anyhow::Result<(u64, Hasher)> {
     let mut writer = OpenOptions::new().write(true).open(file)?;
     let mut thread_hasher = Hasher::new();
+    let mut local_hasher = Hasher::new();
     let mut rng = Pcg64Mcg::seed_from_u64(seed);
     let mut buffer = vec![0; buffer_size];
     let start_chunk = thread_index * chunks_per_thread + chunk_position;
@@ -204,7 +205,7 @@ fn write_chunk_range(
     for chunk in start_chunk..end_chunk {
         let write_size =
             ((position + stream_size - (chunk * chunk_size as u64)) as usize).min(chunk_size);
-        generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher);
+        generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         total_write_size += write_size as u64;
         progress_bytes += write_size as u64;
@@ -231,9 +232,10 @@ fn generate_to_stdout(
     let mut buffer = vec![0u8; chunk_size];
     let mut bytes_generated: u64 = 0;
     let mut hasher = Hasher::new();
+    let mut local_hasher = Hasher::new();
     while bytes_generated < stream_size {
         let write_size = (stream_size - bytes_generated).min(chunk_size as u64) as usize;
-        generate_chunk(&mut rng, &mut buffer, write_size, &mut hasher);
+        generate_chunk(&mut rng, &mut buffer, write_size, &mut hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         bytes_generated += write_size as u64;
         if let Some(pb) = pb {
@@ -248,13 +250,14 @@ pub fn generate_chunk(
     buffer: &mut [u8],
     write_size: usize,
     global_hasher: &mut Hasher,
+    local_hasher: &mut Hasher,
 ) {
     if write_size >= 4 {
         rng.fill_bytes(&mut buffer[..]);
-        let mut hasher = Hasher::new();
-        hasher.update(&buffer[..write_size - 4]);
-        global_hasher.combine(&hasher);
-        let checksum_bytes = hasher.finalize().to_le_bytes();
+        local_hasher.reset();
+        local_hasher.update(&buffer[..write_size - 4]);
+        global_hasher.combine(local_hasher);
+        let checksum_bytes = local_hasher.clone().finalize().to_le_bytes();
         let end_slice = &mut buffer[write_size - 4..write_size];
         end_slice.copy_from_slice(&checksum_bytes);
         // global_hasher.update(&checksum_bytes);
