@@ -20,6 +20,25 @@ use std::time::Instant;
 use crate::cli::CommonArgs;
 use crate::{read_file_size, receive_progress, set_up_progress_bar};
 
+/// Describes the logical random stream being generated
+#[derive(Clone, Debug)]
+struct StreamParams {
+    seed: u64,
+    position: u64,
+    stream_size: u64,
+    chunk_size: usize,
+    buffer_size: usize,
+}
+
+/// Describes the work slice assigned to one thread
+#[derive(Clone, Debug)]
+struct ThreadWork {
+    thread_index: u64,
+    chunks_per_thread: u64,
+    num_chunks: u64,
+    chunk_position: u64,
+}
+
 /// Generate a random stream
 #[derive(Args, Debug)]
 #[command(alias = "write")]
@@ -128,28 +147,24 @@ fn generate_to_file(
     let (tx, rx) = mpsc::channel::<u64>();
     let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
+    let stream = StreamParams {
+        seed: args.seed,
+        position: args.position,
+        stream_size,
+        chunk_size,
+        buffer_size,
+    };
+
     let handles: Vec<_> = (0..num_threads as u64)
         .map(|i| {
-            let seed = args.seed;
             let file = file.clone();
-            let position = args.position;
             let tx = tx.clone();
             let cancel = cancel.clone();
+            let stream = stream.clone();
             thread::spawn(move || -> anyhow::Result<_> {
-                let result = write_chunk_range(
-                    &file,
-                    seed,
-                    position,
-                    stream_size,
-                    chunk_size,
-                    buffer_size,
-                    i,
-                    chunks_per_thread,
-                    num_chunks,
-                    chunk_position,
-                    &tx,
-                    &cancel,
-                );
+                let work =
+                    ThreadWork { thread_index: i, chunks_per_thread, num_chunks, chunk_position };
+                let result = write_chunk_range(&file, &stream, &work, &tx, &cancel);
                 if result.is_err() {
                     // tell the other threads to stop
                     cancel.store(true, Ordering::Relaxed);
@@ -172,39 +187,33 @@ fn generate_to_file(
     Ok((write_bytes, hasher.finalize()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn write_chunk_range(
     file: &PathBuf,
-    seed: u64,
-    position: u64,
-    stream_size: u64,
-    chunk_size: usize,
-    buffer_size: usize,
-    thread_index: u64,
-    chunks_per_thread: u64,
-    num_chunks: u64,
-    chunk_position: u64,
+    stream: &StreamParams,
+    work: &ThreadWork,
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
     let mut writer = OpenOptions::new().write(true).open(file)?;
     let mut thread_hasher = Hasher::new();
     let mut local_hasher = Hasher::new();
-    let mut rng = Pcg64Mcg::seed_from_u64(seed);
-    let mut buffer = vec![0; buffer_size];
-    let start_chunk = thread_index * chunks_per_thread + chunk_position;
-    let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
-    writer.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
+    let mut rng = Pcg64Mcg::seed_from_u64(stream.seed);
+    let mut buffer = vec![0; stream.buffer_size];
+    let start_chunk = work.thread_index * work.chunks_per_thread + work.chunk_position;
+    let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks)
+        + work.chunk_position;
+    writer.seek(io::SeekFrom::Start(start_chunk * stream.chunk_size as u64))?;
     let advance_amount = start_chunk
-        .checked_mul(buffer_size as u64)
+        .checked_mul(stream.buffer_size as u64)
         .ok_or_else(|| anyhow!("arithmetic overflow: start_chunk * buffer_size exceeds u64 max"))?
         / 8;
     rng.advance(advance_amount.into());
     let mut total_write_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
     for chunk in start_chunk..end_chunk {
-        let write_size =
-            ((position + stream_size - (chunk * chunk_size as u64)) as usize).min(chunk_size);
+        let write_size = ((stream.position + stream.stream_size
+            - (chunk * stream.chunk_size as u64)) as usize)
+            .min(stream.chunk_size);
         generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         total_write_size += write_size as u64;
