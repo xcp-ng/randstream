@@ -2,7 +2,6 @@ use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
 use human_units::{FormatDuration, FormatSize as _};
-use indicatif::ProgressBar;
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
@@ -15,7 +14,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{read_exact_or_eof, read_file_size, receive_progress, set_up_progress_bar};
+use crate::{Progress, read_exact_or_eof, read_file_size, receive_progress};
 
 /// Validate a random stream
 ///
@@ -56,17 +55,15 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
 
     let (bytes_validated, checksum) = if let Some(file) = &args.file {
         let stream_size = resolve_stream_size(args, file)?;
-        let pb = (!args.common.no_progress)
-            .then_some(set_up_progress_bar(Some(stream_size)))
-            .transpose()?;
+        let mut pb = Progress::new(Some(stream_size), args.common.no_progress)?;
 
         debug!("position: {}", args.position);
         debug!("stream size: {stream_size}");
         debug!("chunk size: {chunk_size}");
 
-        validate_from_file(args, file, stream_size, chunk_size, &pb)?
+        validate_from_file(args, file, stream_size, chunk_size, &mut pb)?
     } else {
-        let pb = (!args.common.no_progress).then_some(set_up_progress_bar(None)).transpose()?;
+        let mut pb = Progress::new(None, args.common.no_progress)?;
 
         debug!("position: {}", args.position);
         debug!(
@@ -75,7 +72,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         );
         debug!("chunk size: {chunk_size}");
 
-        validate_from_stdin(args, chunk_size, &pb)?
+        validate_from_stdin(args, chunk_size, &mut pb)?
     };
 
     if let Some(expected_checksum) = &args.expected_checksum
@@ -112,7 +109,7 @@ fn validate_from_file(
     file: &Path,
     stream_size: u64,
     chunk_size: usize,
-    pb: &Option<ProgressBar>,
+    pb: &mut Option<Progress>,
 ) -> anyhow::Result<(u64, u32)> {
     let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
     debug!("number of threads: {num_threads}");
@@ -199,7 +196,7 @@ fn validate_chunk_range(
 fn validate_from_stdin(
     args: &ValidateArgs,
     chunk_size: usize,
-    pb: &Option<ProgressBar>,
+    pb: &mut Option<Progress>,
 ) -> anyhow::Result<(u64, u32)> {
     debug!("number of threads: 1");
     // discard the first values up to position
@@ -217,8 +214,8 @@ fn validate_from_stdin(
         validate_chunk(chunk, &buffer[..read_size], &mut hasher)?;
         stream_size += read_size as u64;
         chunk += 1;
-        if let Some(pb) = pb {
-            pb.set_position(stream_size);
+        if let Some(p) = pb {
+            p.tick(stream_size);
         }
     }
     Ok((stream_size, hasher.finalize()))

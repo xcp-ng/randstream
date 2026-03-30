@@ -2,7 +2,6 @@ use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
 use human_units::{FormatDuration as _, FormatSize as _};
-use indicatif::ProgressBar;
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
@@ -18,7 +17,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{read_file_size, receive_progress, set_up_progress_bar};
+use crate::{Progress, read_file_size, receive_progress};
 
 /// Describes the logical random stream being generated
 #[derive(Clone, Debug)]
@@ -77,8 +76,7 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
         ));
     }
     let stream_size = resolve_stream_size(args)?;
-    let pb =
-        (!args.common.no_progress).then_some(set_up_progress_bar(Some(stream_size))).transpose()?;
+    let mut pb = Progress::new(Some(stream_size), args.common.no_progress)?;
 
     debug!("position: {}", args.position);
     debug!("stream size: {stream_size}");
@@ -86,9 +84,9 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     debug!("seed: {}", args.seed);
 
     let (bytes_generated, checksum) = if let Some(file) = &args.file {
-        generate_to_file(args, file, stream_size, chunk_size, buffer_size, &pb)?
+        generate_to_file(args, file, stream_size, chunk_size, buffer_size, &mut pb)?
     } else {
-        generate_to_stdout(args, stream_size, chunk_size, &pb)?
+        generate_to_stdout(args, stream_size, chunk_size, &mut pb)?
     };
 
     info!("checksum: {checksum:08x}");
@@ -127,7 +125,7 @@ fn generate_to_file(
     stream_size: u64,
     chunk_size: usize,
     buffer_size: usize,
-    pb: &Option<ProgressBar>,
+    pb: &mut Option<Progress>,
 ) -> anyhow::Result<(u64, u32)> {
     // make sure the output file exists, before opening it in the threads
     let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
@@ -233,7 +231,7 @@ fn generate_to_stdout(
     args: &GenerateArgs,
     stream_size: u64,
     chunk_size: usize,
-    pb: &Option<ProgressBar>,
+    pb: &mut Option<Progress>,
 ) -> anyhow::Result<(u64, u32)> {
     debug!("number of threads: 1");
     let mut writer = io::stdout();
@@ -247,8 +245,8 @@ fn generate_to_stdout(
         generate_chunk(&mut rng, &mut buffer, write_size, &mut hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         bytes_generated += write_size as u64;
-        if let Some(pb) = pb {
-            pb.set_position(bytes_generated);
+        if let Some(p) = pb {
+            p.tick(bytes_generated);
         }
     }
     Ok((bytes_generated, hasher.finalize()))
