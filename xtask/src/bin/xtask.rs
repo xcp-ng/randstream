@@ -30,6 +30,8 @@ fn main() -> anyhow::Result<()> {
 
 fn release(args: &Release) -> anyhow::Result<()> {
     let sh = Shell::new()?;
+    cmd!(sh, "git checkout master").run()?;
+    cmd!(sh, "git pull").run()?;
     // update the workspace Cargo.toml
     let toml = std::fs::read_to_string("Cargo.toml")?;
     let mut doc = toml.parse::<DocumentMut>()?;
