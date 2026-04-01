@@ -28,8 +28,6 @@ pub struct ValidateArgs {
     pub file: Option<PathBuf>,
 
     /// The stream position
-    ///
-    /// Must be a multiple of the chunk size
     #[clap(short, long, default_value = "0", value_parser=|s: &str| parse_size(s))]
     pub position: u64,
 
@@ -46,12 +44,6 @@ pub struct ValidateArgs {
 pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
     let chunk_size = args.common.chunk_size as usize;
-    if !args.position.is_multiple_of(args.common.chunk_size) {
-        return Err(anyhow!(
-            "The start position {} is not a multiple of the chunk size {chunk_size}",
-            args.position
-        ));
-    }
 
     let (bytes_validated, checksum) = if let Some(file) = &args.file {
         let stream_size = resolve_stream_size(args, file)?;
@@ -116,7 +108,6 @@ fn validate_from_file(
 
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
-    let chunk_position = args.position / chunk_size as u64;
     let (tx, rx) = mpsc::channel::<u64>();
     let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
@@ -125,6 +116,7 @@ fn validate_from_file(
             let file = file.to_path_buf();
             let tx = tx.clone();
             let cancel = cancel.clone();
+            let position = args.position;
             thread::spawn(move || -> anyhow::Result<_> {
                 let result = validate_chunk_range(
                     &file,
@@ -132,7 +124,7 @@ fn validate_from_file(
                     i,
                     chunks_per_thread,
                     num_chunks,
-                    chunk_position,
+                    position,
                     &tx,
                     &cancel,
                 );
@@ -165,16 +157,16 @@ fn validate_chunk_range(
     thread_index: u64,
     chunks_per_thread: u64,
     num_chunks: u64,
-    chunk_position: u64,
+    position: u64,
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
     let mut file = File::open(file)?;
     let mut thread_hasher = Hasher::new();
-    let start_chunk = thread_index * chunks_per_thread + chunk_position;
-    let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks) + chunk_position;
+    let start_chunk = thread_index * chunks_per_thread;
+    let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks);
     let mut buffer = vec![0; chunk_size];
-    file.seek(io::SeekFrom::Start(start_chunk * chunk_size as u64))?;
+    file.seek(io::SeekFrom::Start(position + start_chunk * chunk_size as u64))?;
     let mut total_read_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
     for chunk in start_chunk..end_chunk {
@@ -203,7 +195,7 @@ fn validate_from_stdin(
     io::copy(&mut io::stdin().take(args.position), &mut io::sink())?;
     let mut buffer = vec![0; chunk_size];
     let mut stream_size: u64 = 0;
-    let mut chunk: u64 = args.position / chunk_size as u64;
+    let mut chunk: u64 = 0;
     let mut hasher = Hasher::new();
     while args.common.size.map(|s| stream_size < s).unwrap_or(true) {
         let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;

@@ -220,12 +220,16 @@ fn generate_stdout_matches_file_output() {
 fn generate_with_position_fills_only_the_specified_region() {
     const CHUNK: usize = 32 * 1024; // 32Ki
     let dir = TempDir::new().unwrap();
-    // Create a full 128 KiB file.
+
+    // Generate a reference stream starting from offset 0.
     let full =
-        generate(&dir, &["--size", "128Ki", "--chunk-size", "32Ki", "--seed", "10", "full.bin"]);
+        generate(&dir, &["--size", "32Ki", "--chunk-size", "32Ki", "--seed", "10", "full.bin"]);
     assert!(full.status.success());
 
-    // Write only the second 32 KiB chunk (at position 32 KiB) into a pre-allocated file.
+    // Write the same stream into a pre-allocated 128 KiB file, but starting at
+    // position 32Ki.  Under the new semantics the stream is position-relative:
+    // chunk 0 of this write starts at byte 32Ki in the file, and the RNG is
+    // seeded identically to chunk 0 of the reference file.
     let partial_path = dir.path().join("partial.bin");
     fs::write(&partial_path, vec![0u8; 128 * 1024]).unwrap();
     let partial = generate(
@@ -248,21 +252,41 @@ fn generate_with_position_fills_only_the_specified_region() {
     let full_bytes = fs::read(dir.path().join("full.bin")).unwrap();
     let partial_bytes = fs::read(&partial_path).unwrap();
 
-    // The written region [32Ki..64Ki) must match the full file.
-    assert_eq!(&full_bytes[CHUNK..2 * CHUNK], &partial_bytes[CHUNK..2 * CHUNK]);
+    // The written region [32Ki..64Ki) must equal the reference stream (chunk 0).
+    assert_eq!(&full_bytes[..CHUNK], &partial_bytes[CHUNK..2 * CHUNK]);
     // The region before the position must still be zeros.
     assert_eq!(&partial_bytes[..CHUNK], vec![0u8; CHUNK].as_slice());
+    // The region after the written area must still be zeros.
+    assert_eq!(&partial_bytes[2 * CHUNK..], vec![0u8; 2 * CHUNK].as_slice());
 }
 
 #[test]
-fn generate_position_not_multiple_of_chunk_is_error() {
+fn generate_with_non_aligned_position_roundtrips() {
+    // position=1Ki is not a multiple of chunk_size=32Ki; the stream should
+    // still be generated and validated correctly.
     let dir = TempDir::new().unwrap();
-    // Create target file first.
-    fs::write(dir.path().join("out.bin"), vec![0u8; 64 * 1024]).unwrap();
-    // 1Ki = 1024 is not a multiple of 32Ki = 32768.
-    let out =
-        generate(&dir, &["--size", "32Ki", "--chunk-size", "32Ki", "--position", "1Ki", "out.bin"]);
-    assert!(!out.status.success());
+    let path = dir.path().join("out.bin");
+    fs::write(&path, vec![0u8; 128 * 1024]).unwrap();
+    let g = generate(
+        &dir,
+        &[
+            "--size",
+            "64Ki",
+            "--chunk-size",
+            "32Ki",
+            "--seed",
+            "10",
+            "--position",
+            "1Ki",
+            "--no-truncate",
+            "out.bin",
+        ],
+    );
+    assert!(g.status.success(), "{}", String::from_utf8_lossy(&g.stderr));
+    let v =
+        validate(&dir, &["--size", "64Ki", "--chunk-size", "32Ki", "--position", "1Ki", "out.bin"]);
+    assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
+    assert_eq!(parse_checksum(&g), parse_checksum(&v));
 }
 
 // ---------------------------------------------------------------------------
@@ -497,12 +521,74 @@ fn validate_with_position_skips_earlier_chunks() {
 }
 
 #[test]
-fn validate_position_not_multiple_of_chunk_is_error() {
+fn validate_with_non_aligned_position_file() {
     let dir = TempDir::new().unwrap();
-    generate(&dir, &["--size", "128Ki", "--chunk-size", "32Ki", "--seed", "21", "out.bin"]);
-    // 1Ki is not a multiple of 32Ki.
-    let v = validate(&dir, &["--chunk-size", "32Ki", "--position", "1Ki", "out.bin"]);
-    assert!(!v.status.success());
+    // Generate 128 KiB, then validate a 64 KiB slice starting at 1Ki (non-aligned).
+    let path = dir.path().join("out.bin");
+    fs::write(&path, vec![0u8; 128 * 1024]).unwrap();
+    let g = generate(
+        &dir,
+        &[
+            "--size",
+            "96Ki",
+            "--chunk-size",
+            "32Ki",
+            "--seed",
+            "21",
+            "--position",
+            "1Ki",
+            "--no-truncate",
+            "out.bin",
+        ],
+    );
+    assert!(g.status.success(), "{}", String::from_utf8_lossy(&g.stderr));
+    // Validate the same region.
+    let v =
+        validate(&dir, &["--size", "96Ki", "--chunk-size", "32Ki", "--position", "1Ki", "out.bin"]);
+    assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
+    assert_eq!(parse_checksum(&g), parse_checksum(&v));
+}
+
+#[test]
+fn validate_stdin_with_non_aligned_position() {
+    // Generate a 64 KiB stream into a file starting at byte offset 1Ki (non-aligned).
+    // Then feed the whole file to stdin validate with --position=1Ki so it
+    // discards the first 1Ki of zeros and validates the stream that follows.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("out.bin");
+    fs::write(&path, vec![0u8; 65 * 1024]).unwrap();
+    let g = generate(
+        &dir,
+        &[
+            "--size",
+            "64Ki",
+            "--chunk-size",
+            "1Ki",
+            "--seed",
+            "77",
+            "--position",
+            "1Ki",
+            "--no-truncate",
+            "out.bin",
+        ],
+    );
+    assert!(g.status.success(), "{}", String::from_utf8_lossy(&g.stderr));
+
+    // Feed the entire file (65Ki) to stdin; --position=1Ki discards the first
+    // 1Ki of zeros, then validates the 64Ki stream.
+    let full = fs::read(&path).unwrap();
+
+    let mut val_proc = bin()
+        .args(["validate", "--no-progress", "--chunk-size", "1Ki", "--position", "1Ki"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    val_proc.stdin.as_mut().unwrap().write_all(&full).unwrap();
+    drop(val_proc.stdin.take());
+    let out = val_proc.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(parse_checksum(&out), parse_checksum(&g));
 }
 
 // ---------------------------------------------------------------------------

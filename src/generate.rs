@@ -35,7 +35,6 @@ struct ThreadWork {
     thread_index: u64,
     chunks_per_thread: u64,
     num_chunks: u64,
-    chunk_position: u64,
 }
 
 /// Generate a random stream
@@ -47,8 +46,6 @@ pub struct GenerateArgs {
     pub file: Option<PathBuf>,
 
     /// The stream position
-    ///
-    /// Must be a multiple of the chunk size
     #[clap(short, long, default_value = "0", value_parser=|s: &str| parse_size(s), requires="file")]
     pub position: u64,
 
@@ -69,12 +66,6 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let chunk_size = args.common.chunk_size as usize;
     // we need to write a multiple a 64 bits to be able to use advance()
     let buffer_size = chunk_size.div_ceil(8) * 8;
-    if !args.position.is_multiple_of(args.common.chunk_size) {
-        return Err(anyhow!(
-            "The start position {} is not a multiple of the chunk size {chunk_size}",
-            args.position
-        ));
-    }
     let stream_size = resolve_stream_size(args)?;
     let mut pb = Progress::new(Some(stream_size), args.common.no_progress)?;
 
@@ -141,7 +132,6 @@ fn generate_to_file(
     debug!("number of threads: {num_threads}");
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
-    let chunk_position = args.position / chunk_size as u64;
     let (tx, rx) = mpsc::channel::<u64>();
     let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
@@ -160,8 +150,7 @@ fn generate_to_file(
             let cancel = cancel.clone();
             let stream = stream.clone();
             thread::spawn(move || -> anyhow::Result<_> {
-                let work =
-                    ThreadWork { thread_index: i, chunks_per_thread, num_chunks, chunk_position };
+                let work = ThreadWork { thread_index: i, chunks_per_thread, num_chunks };
                 let result = write_chunk_range(&file, &stream, &work, &tx, &cancel);
                 if result.is_err() {
                     // tell the other threads to stop
@@ -197,10 +186,9 @@ fn write_chunk_range(
     let mut local_hasher = Hasher::new();
     let mut rng = Pcg64Mcg::seed_from_u64(stream.seed);
     let mut buffer = vec![0; stream.buffer_size];
-    let start_chunk = work.thread_index * work.chunks_per_thread + work.chunk_position;
-    let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks)
-        + work.chunk_position;
-    writer.seek(io::SeekFrom::Start(start_chunk * stream.chunk_size as u64))?;
+    let start_chunk = work.thread_index * work.chunks_per_thread;
+    let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks);
+    writer.seek(io::SeekFrom::Start(stream.position + start_chunk * stream.chunk_size as u64))?;
     let advance_amount = start_chunk
         .checked_mul(stream.buffer_size as u64)
         .ok_or_else(|| anyhow!("arithmetic overflow: start_chunk * buffer_size exceeds u64 max"))?
@@ -209,9 +197,8 @@ fn write_chunk_range(
     let mut total_write_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
     for chunk in start_chunk..end_chunk {
-        let write_size = ((stream.position + stream.stream_size
-            - (chunk * stream.chunk_size as u64)) as usize)
-            .min(stream.chunk_size);
+        let write_size = (stream.stream_size - chunk * stream.chunk_size as u64)
+            .min(stream.chunk_size as u64) as usize;
         generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         total_write_size += write_size as u64;
