@@ -1,3 +1,4 @@
+use std::alloc::{Layout, alloc_zeroed};
 use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use clap::Args;
 use compio::buf::IntoInner as _;
 use compio::buf::IoBuf as _;
 use compio::driver::ProactorBuilder;
-use compio::fs::File;
+use compio::fs::OpenOptions;
 use compio::io::AsyncReadAtExt as _;
 use compio_runtime::RuntimeBuilder;
 use crc32fast::Hasher;
@@ -22,6 +23,7 @@ use futures::StreamExt as _;
 use human_units::{FormatDuration, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
+use nix::libc;
 use parse_size::parse_size;
 
 use crate::Progress;
@@ -122,6 +124,19 @@ fn resolve_stream_size(args: &ValidateArgs, file: &Path) -> anyhow::Result<u64> 
     Ok(size - args.position)
 }
 
+/// Allocate a `Vec<u8>` of `size` bytes with 512-byte alignment.
+///
+/// Required for O_DIRECT I/O: the kernel rejects buffers whose address is not
+/// aligned to the logical block size (512 bytes on virtually all drives).
+fn alloc_aligned(size: usize) -> Vec<u8> {
+    unsafe {
+        let layout = Layout::from_size_align(size, 512).expect("invalid layout");
+        let ptr = alloc_zeroed(layout);
+        assert!(!ptr.is_null(), "allocation failed");
+        Vec::from_raw_parts(ptr, size, size)
+    }
+}
+
 fn validate_from_file(
     args: &ValidateArgs,
     file: &Path,
@@ -132,8 +147,10 @@ fn validate_from_file(
     let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
     let io_depth = args.common.io_depth.unwrap_or_else(|| default_io_depth(num_threads));
     let io_depth_per_thread = ((io_depth as usize).div_ceil(num_threads)).max(1);
+    let direct = args.common.direct;
     debug!("number of threads: {num_threads}");
     debug!("io_depth: {io_depth} ({io_depth_per_thread} per thread)");
+    debug!("direct I/O: {direct}");
 
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
@@ -155,11 +172,13 @@ fn validate_from_file(
                 let mut proactor = ProactorBuilder::new();
                 proactor.capacity(io_depth_per_thread as u32);
                 let runtime = RuntimeBuilder::new().with_proactor(proactor).build()?;
+                debug!("validate thread {thread_index}: compio driver = {:?}", runtime.driver_type());
                 let result = runtime.block_on(read_chunk_range(
                     &file,
                     &stream,
                     &work,
                     io_depth_per_thread,
+                    direct,
                     &tx,
                     &cancel,
                 ));
@@ -203,10 +222,12 @@ async fn read_chunk_range(
     stream: &StreamParams,
     work: &ThreadWork,
     io_depth: usize,
+    direct: bool,
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    let file = Rc::new(File::open(file).await?);
+    let open_flags = if direct { libc::O_DIRECT } else { 0 };
+    let file = Rc::new(OpenOptions::new().read(true).custom_flags(open_flags).open(file).await?);
     let start_chunk = work.thread_index * work.chunks_per_thread;
     let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks);
 
@@ -216,9 +237,10 @@ async fn read_chunk_range(
     }
 
     // Pre-allocate io_depth buffers (chunk_size each) to avoid per-chunk allocation.
+    // With O_DIRECT, buffers must be 512-byte aligned; use alloc_aligned() for that.
     // Each in-flight task owns one buffer; completed tasks return it to the free list.
     let mut free_buffers: VecDeque<Vec<u8>> =
-        (0..io_depth).map(|_| vec![0u8; stream.chunk_size]).collect();
+        (0..io_depth).map(|_| alloc_aligned(stream.chunk_size)).collect();
 
     // in_flight futures return (chunk_index, read_size, hasher, buffer) on completion.
     let mut in_flight: FuturesUnordered<ChunkFuture> = FuturesUnordered::new();

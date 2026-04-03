@@ -43,6 +43,12 @@ pub struct CommonArgs {
     #[clap(long)]
     pub io_depth: Option<u32>,
 
+    /// Use O_DIRECT to bypass the kernel page cache (direct I/O)
+    ///
+    /// Requires 512-byte aligned I/O. Useful for benchmarking raw NVMe throughput.
+    #[clap(long)]
+    pub direct: bool,
+
     /// Hide the progress bar
     #[clap(short = 'P', long)]
     pub no_progress: bool,

@@ -1,3 +1,4 @@
+use std::alloc::{Layout, alloc_zeroed};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::collections::VecDeque;
@@ -22,6 +23,7 @@ use futures::StreamExt as _;
 use human_units::{FormatDuration as _, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
+use nix::libc;
 use parse_size::parse_size;
 use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
@@ -119,6 +121,23 @@ fn resolve_stream_size(args: &GenerateArgs) -> anyhow::Result<u64> {
     Err(anyhow!("Size can't be determined. Use --size to provide a stream size."))
 }
 
+/// Allocate a `Vec<u8>` of `size` bytes with 512-byte alignment.
+///
+/// Required for O_DIRECT I/O: the kernel rejects buffers whose address is not
+/// aligned to the logical block size (512 bytes on virtually all drives).
+/// Regular `vec![0u8; n]` provides no alignment guarantee.
+fn alloc_aligned(size: usize) -> Vec<u8> {
+    // SAFETY: Layout is valid (size > 0 and align is a power of two).
+    // We immediately wrap the pointer in a Vec with the correct length/capacity,
+    // ensuring it will be freed via the same allocator.
+    unsafe {
+        let layout = Layout::from_size_align(size, 512).expect("invalid layout");
+        let ptr = alloc_zeroed(layout);
+        assert!(!ptr.is_null(), "allocation failed");
+        Vec::from_raw_parts(ptr, size, size)
+    }
+}
+
 fn generate_to_file(
     args: &GenerateArgs,
     file: &PathBuf,
@@ -140,8 +159,10 @@ fn generate_to_file(
     let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
     let io_depth = args.common.io_depth.unwrap_or_else(|| default_io_depth(num_threads));
     let io_depth_per_thread = ((io_depth as usize).div_ceil(num_threads)).max(1);
+    let direct = args.common.direct;
     debug!("number of threads: {num_threads}");
     debug!("io_depth: {io_depth} ({io_depth_per_thread} per thread)");
+    debug!("direct I/O: {direct}");
 
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
@@ -169,11 +190,13 @@ fn generate_to_file(
                 let mut proactor = ProactorBuilder::new();
                 proactor.capacity(io_depth_per_thread as u32);
                 let runtime = RuntimeBuilder::new().with_proactor(proactor).build()?;
+                debug!("generate thread {thread_index}: compio driver = {:?}", runtime.driver_type());
                 let result = runtime.block_on(write_chunk_range(
                     &file,
                     &stream,
                     &work,
                     io_depth_per_thread,
+                    direct,
                     &tx,
                     &cancel,
                 ));
@@ -217,10 +240,14 @@ async fn write_chunk_range(
     stream: &StreamParams,
     work: &ThreadWork,
     io_depth: usize,
+    direct: bool,
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    let file = Rc::new(OpenOptions::new().write(true).open(file).await?);
+    let open_flags = if direct { libc::O_DIRECT } else { 0 };
+    let file = Rc::new(
+        OpenOptions::new().write(true).custom_flags(open_flags).open(file).await?,
+    );
     let start_chunk = work.thread_index * work.chunks_per_thread;
     let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks);
 
@@ -230,9 +257,10 @@ async fn write_chunk_range(
     }
 
     // Pre-allocate io_depth buffers (buffer_size each) to avoid per-chunk allocation.
+    // With O_DIRECT, buffers must be 512-byte aligned; use alloc_aligned() for that.
     // Each in-flight task owns one buffer; completed tasks return it to the free list.
     let mut free_buffers: VecDeque<Vec<u8>> =
-        (0..io_depth).map(|_| vec![0u8; stream.buffer_size]).collect();
+        (0..io_depth).map(|_| alloc_aligned(stream.buffer_size)).collect();
 
     // in_flight: (chunk_index, future result)
     // We keep a Vec so we can accumulate results in chunk order for deterministic hasher.combine().
