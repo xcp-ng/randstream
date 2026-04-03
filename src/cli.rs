@@ -37,6 +37,12 @@ pub struct CommonArgs {
     #[clap(short, long, default_value = "32ki", value_parser=|s: &str| parse_size(s))]
     pub chunk_size: u64,
 
+    /// The number of in-flight I/O operations per thread
+    ///
+    /// Defaults to num_jobs * 64
+    #[clap(long)]
+    pub io_depth: Option<u32>,
+
     /// Hide the progress bar
     #[clap(short = 'P', long)]
     pub no_progress: bool,

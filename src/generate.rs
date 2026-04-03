@@ -1,26 +1,36 @@
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Instant;
+
 use anyhow::anyhow;
 use clap::Args;
+use compio::buf::IntoInner as _;
+use compio::buf::IoBuf as _;
+use compio::driver::ProactorBuilder;
+use compio::fs::OpenOptions;
+use compio::io::AsyncWriteAtExt as _;
+use compio_runtime::RuntimeBuilder;
 use crc32fast::Hasher;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt as _;
 use human_units::{FormatDuration as _, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
-use rand::Rng as _;
 use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
-use std::fs::OpenOptions;
-use std::io::{self, Seek as _, Write};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
-use std::thread;
-use std::time::Instant;
 
+use crate::Progress;
 use crate::cli::CommonArgs;
-use crate::{Progress, read_file_size, receive_progress};
+use crate::{default_io_depth, read_file_size};
 
-/// Describes the logical random stream being generated
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct StreamParams {
     seed: u64,
     position: u64,
@@ -29,8 +39,7 @@ struct StreamParams {
     buffer_size: usize,
 }
 
-/// Describes the work slice assigned to one thread
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ThreadWork {
     thread_index: u64,
     chunks_per_thread: u64,
@@ -64,7 +73,7 @@ pub struct GenerateArgs {
 pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     let start = Instant::now();
     let chunk_size = args.common.chunk_size as usize;
-    // we need to write a multiple a 64 bits to be able to use advance()
+    // we need to write a multiple of 64 bits to be able to use advance()
     let buffer_size = chunk_size.div_ceil(8) * 8;
     let stream_size = resolve_stream_size(args)?;
     let mut pb = Progress::new(Some(stream_size), args.common.no_progress)?;
@@ -118,22 +127,24 @@ fn generate_to_file(
     buffer_size: usize,
     pb: &mut Option<Progress>,
 ) -> anyhow::Result<(u64, u32)> {
-    // make sure the output file exists, before opening it in the threads
-    let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
-    // and that the file size matches the requested size
+    // Pre-create the file synchronously and set its size before opening async handles
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
     if file.is_file() {
         let end_position = stream_size + args.position;
         if end_position > f.metadata()?.len() || !args.no_truncate {
             f.set_len(end_position)?;
         }
     }
+    drop(f);
 
     let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
+    let io_depth = args.common.io_depth.unwrap_or_else(|| default_io_depth(num_threads));
+    let io_depth_per_thread = ((io_depth as usize).div_ceil(num_threads)).max(1);
     debug!("number of threads: {num_threads}");
+    debug!("io_depth: {io_depth} ({io_depth_per_thread} per thread)");
+
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
-    let (tx, rx) = mpsc::channel::<u64>();
-    let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     let stream = StreamParams {
         seed: args.seed,
@@ -143,17 +154,30 @@ fn generate_to_file(
         buffer_size,
     };
 
+    let (tx, rx) = mpsc::channel::<u64>();
+    let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
     let handles: Vec<_> = (0..num_threads as u64)
-        .map(|i| {
+        .map(|thread_index| {
             let file = file.clone();
             let tx = tx.clone();
             let cancel = cancel.clone();
             let stream = stream.clone();
-            thread::spawn(move || -> anyhow::Result<_> {
-                let work = ThreadWork { thread_index: i, chunks_per_thread, num_chunks };
-                let result = write_chunk_range(&file, &stream, &work, &tx, &cancel);
+            let work = ThreadWork { thread_index, chunks_per_thread, num_chunks };
+
+            thread::spawn(move || -> anyhow::Result<(u64, Hasher)> {
+                let mut proactor = ProactorBuilder::new();
+                proactor.capacity(io_depth_per_thread as u32);
+                let runtime = RuntimeBuilder::new().with_proactor(proactor).build()?;
+                let result = runtime.block_on(write_chunk_range(
+                    &file,
+                    &stream,
+                    &work,
+                    io_depth_per_thread,
+                    &tx,
+                    &cancel,
+                ));
                 if result.is_err() {
-                    // tell the other threads to stop
                     cancel.store(true, Ordering::Relaxed);
                 }
                 result
@@ -161,57 +185,143 @@ fn generate_to_file(
         })
         .collect();
 
-    receive_progress(pb, &rx, tx);
-    let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
-
-    let write_bytes = thread_data.iter().map(|(b, _)| b).sum();
-    let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
-    let mut hasher = thread_hashers[0].clone();
-    for partial_hasher in thread_hashers[1..].iter() {
-        hasher.combine(partial_hasher);
+    // Drive progress from the main thread while workers run
+    drop(tx);
+    let mut total_bytes: u64 = 0;
+    if let Some(p) = pb {
+        while let Ok(bytes) = rx.recv() {
+            total_bytes += bytes;
+            p.tick(total_bytes);
+        }
+        p.finish();
+    } else {
+        while rx.recv().is_ok() {}
     }
 
-    Ok((write_bytes, hasher.finalize()))
+    let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
+    let written_bytes = thread_data.iter().map(|(b, _)| b).sum();
+    let mut hasher = thread_data[0].1.clone();
+    for (_, partial) in &thread_data[1..] {
+        hasher.combine(partial);
+    }
+
+    Ok((written_bytes, hasher.finalize()))
 }
 
-fn write_chunk_range(
+type ChunkFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = anyhow::Result<(u64, u64, Hasher, Vec<u8>)>>>,
+>;
+
+async fn write_chunk_range(
     file: &PathBuf,
     stream: &StreamParams,
     work: &ThreadWork,
+    io_depth: usize,
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    let mut writer = OpenOptions::new().write(true).open(file)?;
-    let mut thread_hasher = Hasher::new();
-    let mut local_hasher = Hasher::new();
-    let mut rng = Pcg64Mcg::seed_from_u64(stream.seed);
-    let mut buffer = vec![0; stream.buffer_size];
+    let file = Rc::new(OpenOptions::new().write(true).open(file).await?);
     let start_chunk = work.thread_index * work.chunks_per_thread;
     let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks);
-    writer.seek(io::SeekFrom::Start(stream.position + start_chunk * stream.chunk_size as u64))?;
-    let advance_amount = start_chunk
-        .checked_mul(stream.buffer_size as u64)
-        .ok_or_else(|| anyhow!("arithmetic overflow: start_chunk * buffer_size exceeds u64 max"))?
-        / 8;
-    rng.advance(advance_amount.into());
-    let mut total_write_size: u64 = 0;
-    let mut progress_bytes: u64 = 0;
-    for chunk in start_chunk..end_chunk {
-        let write_size = (stream.stream_size - chunk * stream.chunk_size as u64)
-            .min(stream.chunk_size as u64) as usize;
-        generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher, &mut local_hasher);
-        writer.write_all(&buffer[..write_size])?;
-        total_write_size += write_size as u64;
-        progress_bytes += write_size as u64;
-        if chunk % 100 == 0 {
-            tx.send(progress_bytes)?;
-            progress_bytes = 0;
+
+    // Nothing to do if this thread has no chunks (more threads than chunks).
+    if start_chunk >= end_chunk {
+        return Ok((0, Hasher::new()));
+    }
+
+    // Pre-allocate io_depth buffers (buffer_size each) to avoid per-chunk allocation.
+    // Each in-flight task owns one buffer; completed tasks return it to the free list.
+    let mut free_buffers: VecDeque<Vec<u8>> =
+        (0..io_depth).map(|_| vec![0u8; stream.buffer_size]).collect();
+
+    // in_flight: (chunk_index, future result)
+    // We keep a Vec so we can accumulate results in chunk order for deterministic hasher.combine().
+    let mut in_flight: FuturesUnordered<ChunkFuture> = FuturesUnordered::new();
+
+    // results[i] stores the (write_size, hasher) for chunk start_chunk+i, filled in as futures complete.
+    let num_chunks = (end_chunk - start_chunk) as usize;
+    let mut results: Vec<Option<(u64, Hasher)>> = vec![None; num_chunks];
+
+    let mut next_chunk = start_chunk;
+
+    loop {
+        // Launch new tasks as long as we have free buffers and pending chunks.
+        while next_chunk < end_chunk && !free_buffers.is_empty() {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let chunk = next_chunk;
+            next_chunk += 1;
+
+            let mut buffer = free_buffers.pop_front().expect("checked non-empty above");
+            let file = Rc::clone(&file);
+            let tx = tx.clone();
+            let stream = stream.clone();
+
+            in_flight.push(Box::pin(async move {
+                let mut rng = Pcg64Mcg::seed_from_u64(stream.seed);
+                // advance() is O(log2(128)) — effectively free
+                let advance_amount = chunk
+                    .checked_mul(stream.buffer_size as u64)
+                    .ok_or_else(|| {
+                        anyhow!("arithmetic overflow: chunk * buffer_size exceeds u64 max")
+                    })?
+                    / 8;
+                rng.advance(advance_amount.into());
+
+                let mut thread_hasher = Hasher::new();
+                let mut local_hasher = Hasher::new();
+                let write_size = (stream.stream_size - chunk * stream.chunk_size as u64)
+                    .min(stream.chunk_size as u64) as usize;
+                generate_chunk(
+                    &mut rng,
+                    &mut buffer,
+                    write_size,
+                    &mut thread_hasher,
+                    &mut local_hasher,
+                );
+
+                let offset = stream.position + chunk * stream.chunk_size as u64;
+                // Use .slice(0..write_size) so compio sees the correct buffer length
+                // without truncating/reallocating. into_inner() recovers the full Vec.
+                let buf_result =
+                    (&*file).write_all_at(buffer.slice(0..write_size), offset).await;
+                buf_result.0?;
+                let buffer = buf_result.1.into_inner();
+
+                let _ = tx.send(write_size as u64);
+                Ok((chunk, write_size as u64, thread_hasher, buffer))
+            }));
         }
-        if cancel.load(Ordering::Relaxed) {
-            return Ok((total_write_size, thread_hasher));
+
+        if in_flight.is_empty() {
+            break;
+        }
+
+        // Wait for any one future to complete.
+        match in_flight.next().await {
+            Some(Ok((chunk, write_size, hasher, buffer))) => {
+                free_buffers.push_back(buffer);
+                let idx = (chunk - start_chunk) as usize;
+                results[idx] = Some((write_size, hasher));
+            }
+            Some(Err(e)) => {
+                cancel.store(true, Ordering::Relaxed);
+                return Err(e);
+            }
+            None => break,
         }
     }
-    Ok((total_write_size, thread_hasher))
+
+    // Combine results in chunk order so hasher.combine() is deterministic.
+    let mut total_bytes: u64 = 0;
+    let mut combined_hasher = Hasher::new();
+    for (bytes, hasher) in results.into_iter().flatten() {
+        total_bytes += bytes;
+        combined_hasher.combine(&hasher);
+    }
+
+    Ok((total_bytes, combined_hasher))
 }
 
 fn generate_to_stdout(
@@ -223,7 +333,8 @@ fn generate_to_stdout(
     debug!("number of threads: 1");
     let mut writer = io::stdout();
     let mut rng = Pcg64Mcg::seed_from_u64(args.seed);
-    let mut buffer = vec![0u8; chunk_size];
+    let buffer_size = chunk_size.div_ceil(8) * 8;
+    let mut buffer = vec![0u8; buffer_size];
     let mut bytes_generated: u64 = 0;
     let mut hasher = Hasher::new();
     let mut local_hasher = Hasher::new();
@@ -246,6 +357,7 @@ pub fn generate_chunk(
     global_hasher: &mut Hasher,
     local_hasher: &mut Hasher,
 ) {
+    use rand::Rng as _;
     if write_size >= 4 {
         rng.fill_bytes(&mut buffer[..]);
         local_hasher.reset();
@@ -254,7 +366,6 @@ pub fn generate_chunk(
         let checksum_bytes = local_hasher.clone().finalize().to_le_bytes();
         let end_slice = &mut buffer[write_size - 4..write_size];
         end_slice.copy_from_slice(&checksum_bytes);
-        // global_hasher.update(&checksum_bytes);
     } else {
         // not enough room to fit the checksum, just push some zeros in there
         buffer[..write_size].fill(0);

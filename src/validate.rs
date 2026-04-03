@@ -1,20 +1,46 @@
+use std::collections::VecDeque;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Instant;
+
 use anyhow::anyhow;
 use clap::Args;
+use compio::buf::IntoInner as _;
+use compio::buf::IoBuf as _;
+use compio::driver::ProactorBuilder;
+use compio::fs::File;
+use compio::io::AsyncReadAtExt as _;
+use compio_runtime::RuntimeBuilder;
 use crc32fast::Hasher;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt as _;
 use human_units::{FormatDuration, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
-use std::fs::File;
-use std::io::{self, Read, Seek};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
-use std::thread;
-use std::time::Instant;
 
+use crate::Progress;
 use crate::cli::CommonArgs;
-use crate::{Progress, read_exact_or_eof, read_file_size, receive_progress};
+use crate::{default_io_depth, read_exact_or_eof, read_file_size};
+
+#[derive(Clone)]
+struct StreamParams {
+    position: u64,
+    stream_size: u64,
+    chunk_size: usize,
+}
+
+#[derive(Clone)]
+struct ThreadWork {
+    thread_index: u64,
+    chunks_per_thread: u64,
+    num_chunks: u64,
+}
 
 /// Validate a random stream
 ///
@@ -104,32 +130,40 @@ fn validate_from_file(
     pb: &mut Option<Progress>,
 ) -> anyhow::Result<(u64, u32)> {
     let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
+    let io_depth = args.common.io_depth.unwrap_or_else(|| default_io_depth(num_threads));
+    let io_depth_per_thread = ((io_depth as usize).div_ceil(num_threads)).max(1);
     debug!("number of threads: {num_threads}");
+    debug!("io_depth: {io_depth} ({io_depth_per_thread} per thread)");
 
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
+
     let (tx, rx) = mpsc::channel::<u64>();
     let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
+    let stream = StreamParams { position: args.position, stream_size, chunk_size };
+
     let handles: Vec<_> = (0..num_threads as u64)
-        .map(|i| {
+        .map(|thread_index| {
             let file = file.to_path_buf();
             let tx = tx.clone();
             let cancel = cancel.clone();
-            let position = args.position;
-            thread::spawn(move || -> anyhow::Result<_> {
-                let result = validate_chunk_range(
+            let stream = stream.clone();
+            let work = ThreadWork { thread_index, chunks_per_thread, num_chunks };
+
+            thread::spawn(move || -> anyhow::Result<(u64, Hasher)> {
+                let mut proactor = ProactorBuilder::new();
+                proactor.capacity(io_depth_per_thread as u32);
+                let runtime = RuntimeBuilder::new().with_proactor(proactor).build()?;
+                let result = runtime.block_on(read_chunk_range(
                     &file,
-                    chunk_size,
-                    i,
-                    chunks_per_thread,
-                    num_chunks,
-                    position,
+                    &stream,
+                    &work,
+                    io_depth_per_thread,
                     &tx,
                     &cancel,
-                );
+                ));
                 if result.is_err() {
-                    // tell the other threads to stop
                     cancel.store(true, Ordering::Relaxed);
                 }
                 result
@@ -137,52 +171,127 @@ fn validate_from_file(
         })
         .collect();
 
-    receive_progress(pb, &rx, tx);
-    let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
+    // Drive progress from the main thread while workers run
+    drop(tx);
+    let mut total_bytes: u64 = 0;
+    if let Some(p) = pb {
+        while let Ok(bytes) = rx.recv() {
+            total_bytes += bytes;
+            p.tick(total_bytes);
+        }
+        p.finish();
+    } else {
+        while rx.recv().is_ok() {}
+    }
 
+    let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
     let read_bytes = thread_data.iter().map(|(b, _)| b).sum();
-    let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
-    let mut hasher = thread_hashers[0].clone();
-    for partial_hasher in thread_hashers[1..].iter() {
-        hasher.combine(partial_hasher);
+    let mut hasher = thread_data[0].1.clone();
+    for (_, partial) in &thread_data[1..] {
+        hasher.combine(partial);
     }
 
     Ok((read_bytes, hasher.finalize()))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_chunk_range(
+type ChunkFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = anyhow::Result<(u64, u64, Hasher, Vec<u8>)>>>,
+>;
+
+async fn read_chunk_range(
     file: &Path,
-    chunk_size: usize,
-    thread_index: u64,
-    chunks_per_thread: u64,
-    num_chunks: u64,
-    position: u64,
+    stream: &StreamParams,
+    work: &ThreadWork,
+    io_depth: usize,
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    let mut file = File::open(file)?;
-    let mut thread_hasher = Hasher::new();
-    let start_chunk = thread_index * chunks_per_thread;
-    let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks);
-    let mut buffer = vec![0; chunk_size];
-    file.seek(io::SeekFrom::Start(position + start_chunk * chunk_size as u64))?;
-    let mut total_read_size: u64 = 0;
-    let mut progress_bytes: u64 = 0;
-    for chunk in start_chunk..end_chunk {
-        let read_size = read_exact_or_eof(&mut file, &mut buffer)?;
-        validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
-        total_read_size += read_size as u64;
-        progress_bytes += read_size as u64;
-        if chunk % 100 == 0 {
-            tx.send(progress_bytes)?;
-            progress_bytes = 0;
+    let file = Rc::new(File::open(file).await?);
+    let start_chunk = work.thread_index * work.chunks_per_thread;
+    let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks);
+
+    // Nothing to do if this thread has no chunks (more threads than chunks).
+    if start_chunk >= end_chunk {
+        return Ok((0, Hasher::new()));
+    }
+
+    // Pre-allocate io_depth buffers (chunk_size each) to avoid per-chunk allocation.
+    // Each in-flight task owns one buffer; completed tasks return it to the free list.
+    let mut free_buffers: VecDeque<Vec<u8>> =
+        (0..io_depth).map(|_| vec![0u8; stream.chunk_size]).collect();
+
+    // in_flight futures return (chunk_index, read_size, hasher, buffer) on completion.
+    let mut in_flight: FuturesUnordered<ChunkFuture> = FuturesUnordered::new();
+
+    // results[i] stores (read_size, hasher) for chunk start_chunk+i, filled as futures complete.
+    let num_chunks = (end_chunk - start_chunk) as usize;
+    let mut results: Vec<Option<(u64, Hasher)>> = vec![None; num_chunks];
+
+    let mut next_chunk = start_chunk;
+
+    loop {
+        // Launch new tasks as long as we have free buffers and pending chunks.
+        while next_chunk < end_chunk && !free_buffers.is_empty() {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let chunk = next_chunk;
+            next_chunk += 1;
+
+            let buffer = free_buffers.pop_front().expect("checked non-empty above");
+            let file = Rc::clone(&file);
+            let tx = tx.clone();
+            let stream = stream.clone();
+
+            in_flight.push(Box::pin(async move {
+                let read_size = (stream.stream_size - chunk * stream.chunk_size as u64)
+                    .min(stream.chunk_size as u64) as usize;
+                let offset = stream.position + chunk * stream.chunk_size as u64;
+
+                // Use .slice(0..read_size) so compio sees the correct buffer length
+                // without reallocating (buf_capacity() of Vec = capacity(), not len()).
+                // into_inner() recovers the full Vec after the read.
+                let buf_result = file.read_exact_at(buffer.slice(0..read_size), offset).await;
+                buf_result.0?;
+                let buffer = buf_result.1.into_inner();
+
+                let mut thread_hasher = Hasher::new();
+                validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
+
+                let _ = tx.send(read_size as u64);
+
+                Ok((chunk, read_size as u64, thread_hasher, buffer))
+            }));
         }
-        if cancel.load(Ordering::Relaxed) {
-            return Ok((total_read_size, thread_hasher));
+
+        if in_flight.is_empty() {
+            break;
+        }
+
+        // Wait for any one future to complete.
+        match in_flight.next().await {
+            Some(Ok((chunk, read_size, hasher, buffer))) => {
+                free_buffers.push_back(buffer);
+                let idx = (chunk - start_chunk) as usize;
+                results[idx] = Some((read_size, hasher));
+            }
+            Some(Err(e)) => {
+                cancel.store(true, Ordering::Relaxed);
+                return Err(e);
+            }
+            None => break,
         }
     }
-    Ok((total_read_size, thread_hasher))
+
+    // Combine results in chunk order so hasher.combine() is deterministic.
+    let mut total_bytes: u64 = 0;
+    let mut combined_hasher = Hasher::new();
+    for (bytes, hasher) in results.into_iter().flatten() {
+        total_bytes += bytes;
+        combined_hasher.combine(&hasher);
+    }
+
+    Ok((total_bytes, combined_hasher))
 }
 
 fn validate_from_stdin(
@@ -219,7 +328,6 @@ pub fn validate_chunk(chunk: u64, buffer: &[u8], global_hasher: &mut Hasher) -> 
     if read_size >= 4 {
         hasher.update(&buffer[..read_size - 4]);
         global_hasher.combine(&hasher);
-        // global_hasher.update(&buffer[read_size - 4..read_size]);
         let stream_checksum =
             u32::from_le_bytes(buffer[read_size - 4..read_size].try_into().unwrap());
         let checksum = hasher.finalize();

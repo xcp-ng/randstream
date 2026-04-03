@@ -2,7 +2,6 @@ use std::fs::File;
 use std::io;
 use std::io::IsTerminal as _;
 use std::os::fd::AsRawFd as _;
-use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 use std::{io::Read, os::unix::fs::FileTypeExt, path::Path};
 
@@ -52,7 +51,7 @@ pub fn read_file_size(path: &Path) -> anyhow::Result<u64> {
     }
 }
 
-fn read_exact_or_eof(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
+pub fn read_exact_or_eof(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
     let mut bytes_read = 0;
     while bytes_read < buffer.len() {
         let n = reader.read(&mut buffer[bytes_read..])?;
@@ -62,6 +61,11 @@ fn read_exact_or_eof(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<us
         bytes_read += n;
     }
     Ok(bytes_read)
+}
+
+/// Returns the default io_depth: num_jobs * 64, capped at 4096.
+pub fn default_io_depth(num_jobs: usize) -> u32 {
+    ((num_jobs * 64) as u32).min(4096)
 }
 
 /// Progress tracking for TTY (animated bar) or non-TTY (periodic log lines)
@@ -164,18 +168,4 @@ fn set_up_progress_bar(stream_size: Option<u64>) -> anyhow::Result<ProgressBar> 
         }),
     );
     Ok(pb)
-}
-
-pub fn receive_progress(pb: &mut Option<Progress>, rx: &Receiver<u64>, tx: Sender<u64>) {
-    drop(tx);
-    let mut total_bytes = 0;
-    if let Some(p) = pb {
-        while let Ok(bytes) = rx.recv() {
-            total_bytes += bytes;
-            p.tick(total_bytes);
-        }
-        p.finish();
-    } else {
-        while rx.recv().is_ok() {}
-    }
 }
