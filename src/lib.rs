@@ -217,7 +217,7 @@ pub fn receive_progress(pb: &mut Option<Progress>, rx: &Receiver<u64>, tx: Sende
 pub fn log_metrics(start: Instant, bytes: u64, label: &str) {
     let elapsed = start.elapsed();
     let throughput = if elapsed.as_micros() > 0 {
-        (bytes as f32 / elapsed.as_micros() as f32 * 1_000_000.0) as usize 
+        (bytes as f32 / elapsed.as_micros() as f32 * 1_000_000.0) as usize
     } else {
         0
     };
