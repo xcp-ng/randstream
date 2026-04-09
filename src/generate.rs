@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
-use human_units::{FormatDuration as _, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
@@ -17,7 +16,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{Progress, read_file_size, receive_progress};
+use crate::{Progress, log_metrics, read_file_size, receive_progress};
 
 /// Describes the logical random stream being generated
 #[derive(Clone, Debug)]
@@ -61,7 +60,7 @@ pub struct GenerateArgs {
     pub common: CommonArgs,
 }
 
-pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
+pub fn generate(args: &GenerateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<i32> {
     let start = Instant::now();
     let chunk_size = args.common.chunk_size as usize;
     // we need to write a multiple a 64 bits to be able to use advance()
@@ -75,19 +74,19 @@ pub fn generate(args: &GenerateArgs) -> anyhow::Result<i32> {
     debug!("seed: {}", args.seed);
 
     let (bytes_generated, checksum) = if let Some(file) = &args.file {
-        generate_to_file(args, file, stream_size, chunk_size, buffer_size, &mut pb)?
+        generate_to_file(args, file, stream_size, chunk_size, buffer_size, &mut pb, &cancel)?
     } else {
         generate_to_stdout(args, stream_size, chunk_size, &mut pb)?
     };
 
+    // Check if operation was cancelled
+    if cancel.load(Ordering::Relaxed) {
+        log_metrics(start, bytes_generated, "written bytes");
+        return Ok(130);
+    }
+
     info!("checksum: {checksum:08x}");
-    debug!("written bytes: {bytes_generated}");
-    debug!(
-        "throughput: {}/s",
-        ((bytes_generated as f32 / start.elapsed().as_micros() as f32 * 1000000.0) as usize)
-            .format_size()
-    );
-    debug!("run in {}", start.elapsed().format_duration());
+    log_metrics(start, bytes_generated, "written bytes");
     Ok(0)
 }
 
@@ -117,6 +116,7 @@ fn generate_to_file(
     chunk_size: usize,
     buffer_size: usize,
     pb: &mut Option<Progress>,
+    cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<(u64, u32)> {
     // make sure the output file exists, before opening it in the threads
     let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
@@ -133,7 +133,6 @@ fn generate_to_file(
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
     let (tx, rx) = mpsc::channel::<u64>();
-    let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     let stream = StreamParams {
         seed: args.seed,

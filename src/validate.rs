@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
-use human_units::{FormatDuration, FormatSize as _};
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
@@ -14,7 +13,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{Progress, read_exact_or_eof, read_file_size, receive_progress};
+use crate::{Progress, log_metrics, read_exact_or_eof, read_file_size, receive_progress};
 
 /// Validate a random stream
 ///
@@ -41,7 +40,7 @@ pub struct ValidateArgs {
     pub common: CommonArgs,
 }
 
-pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
+pub fn validate(args: &ValidateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<i32> {
     let start = Instant::now();
     let chunk_size = args.common.chunk_size as usize;
 
@@ -53,7 +52,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         debug!("stream size: {stream_size}");
         debug!("chunk size: {chunk_size}");
 
-        validate_from_file(args, file, stream_size, chunk_size, &mut pb)?
+        validate_from_file(args, file, stream_size, chunk_size, &mut pb, &cancel)?
     } else {
         let mut pb = Progress::new(None, args.common.no_progress)?;
 
@@ -67,6 +66,12 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         validate_from_stdin(args, chunk_size, &mut pb)?
     };
 
+    // Check if operation was cancelled
+    if cancel.load(Ordering::Relaxed) {
+        log_metrics(start, bytes_validated, "read bytes");
+        return Ok(130);
+    }
+
     if let Some(expected_checksum) = &args.expected_checksum
         && expected_checksum != &format!("{checksum:08x}")
     {
@@ -75,13 +80,7 @@ pub fn validate(args: &ValidateArgs) -> anyhow::Result<i32> {
         ));
     }
     info!("checksum: {checksum:08x}");
-    debug!("read bytes: {bytes_validated}");
-    debug!(
-        "throughput: {}/s",
-        ((bytes_validated as f32 / start.elapsed().as_micros() as f32 * 1000000.0) as usize)
-            .format_size()
-    );
-    debug!("run in {}", start.elapsed().format_duration());
+    log_metrics(start, bytes_validated, "read bytes");
     Ok(0)
 }
 
@@ -102,6 +101,7 @@ fn validate_from_file(
     stream_size: u64,
     chunk_size: usize,
     pb: &mut Option<Progress>,
+    cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<(u64, u32)> {
     let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
     debug!("number of threads: {num_threads}");
@@ -109,7 +109,6 @@ fn validate_from_file(
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
     let (tx, rx) = mpsc::channel::<u64>();
-    let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     let handles: Vec<_> = (0..num_threads as u64)
         .map(|i| {

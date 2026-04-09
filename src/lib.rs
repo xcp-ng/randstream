@@ -6,10 +6,11 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 use std::{io::Read, os::unix::fs::FileTypeExt, path::Path};
 
-use human_units::FormatSize as _;
+use human_units::{FormatDuration, FormatSize as _};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 extern crate log;
+use log::debug;
 
 pub mod cli;
 pub mod generate;
@@ -80,6 +81,13 @@ pub enum Progress {
     Log(LogProgress),
 }
 
+/// Metrics wrapper for tracking elapsed time, bytes processed, and throughput
+pub struct Metrics {
+    pub progress: Option<Progress>,
+    pub start_time: Instant,
+    pub bytes_processed: u64,
+}
+
 impl Progress {
     /// Create a new progress tracker. Returns `None` if progress is disabled or cannot be tracked.
     pub fn new(stream_size: Option<u64>, no_progress: bool) -> anyhow::Result<Option<Self>> {
@@ -117,6 +125,31 @@ impl Progress {
         if let Progress::Bar(pb) = self {
             pb.finish_and_clear();
         }
+    }
+}
+
+impl Metrics {
+    /// Create a new metrics tracker
+    pub fn new(stream_size: Option<u64>, no_progress: bool) -> anyhow::Result<Self> {
+        Ok(Metrics {
+            progress: Progress::new(stream_size, no_progress)?,
+            start_time: Instant::now(),
+            bytes_processed: 0,
+        })
+    }
+
+    /// Format and log interrupt summary at DEBUG level
+    pub fn log_interrupt_summary(&self) {
+        let elapsed = self.start_time.elapsed();
+        let throughput = if elapsed.as_secs_f64() > 0.0 {
+            (self.bytes_processed as f64 / elapsed.as_secs_f64()) as usize
+        } else {
+            0
+        };
+
+        debug!("Total time: {}", elapsed.format_duration());
+        debug!("Throughput: {}/s", throughput.format_size());
+        debug!("Total bytes written/read: {}", self.bytes_processed.format_size());
     }
 }
 
@@ -178,4 +211,18 @@ pub fn receive_progress(pb: &mut Option<Progress>, rx: &Receiver<u64>, tx: Sende
     } else {
         while rx.recv().is_ok() {}
     }
+}
+
+/// Log debug metrics: elapsed time, throughput, and bytes processed
+pub fn log_metrics(start: Instant, bytes: u64, label: &str) {
+    let elapsed = start.elapsed();
+    let throughput = if elapsed.as_micros() > 0 {
+        (bytes as f32 / elapsed.as_micros() as f32 * 1_000_000.0) as usize 
+    } else {
+        0
+    };
+
+    debug!("{label}: {bytes}");
+    debug!("throughput: {}/s", throughput.format_size());
+    debug!("run in {}", elapsed.format_duration());
 }

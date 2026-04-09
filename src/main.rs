@@ -2,6 +2,8 @@
 extern crate log;
 
 use clap::Parser;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use randstream::cli;
 
@@ -14,9 +16,18 @@ fn run() -> anyhow::Result<i32> {
         ocli::init(level).unwrap();
     }
 
+    // Initialize the cancel flag
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Install signal handler
+    let cancel_clone = cancel.clone();
+    ctrlc::set_handler(move || {
+        cancel_clone.store(true, Ordering::Relaxed);
+    })?;
+
     match &cli.command.unwrap() {
-        cli::Commands::Generate(args) => generate(args),
-        cli::Commands::Validate(args) => validate(args),
+        cli::Commands::Generate(args) => generate(args, cancel),
+        cli::Commands::Validate(args) => validate(args, cancel),
     }
 }
 
