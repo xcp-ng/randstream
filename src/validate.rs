@@ -171,11 +171,11 @@ fn validate_chunk_range(
     let mut total_read_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
     for chunk in start_chunk..end_chunk {
-         let bytes_done = (chunk - start_chunk) * chunk_size as u64;
-         let remaining = (stream_size - start_chunk * chunk_size as u64 - bytes_done)
-             .min(chunk_size as u64) as usize;
-         let read_size = read_exact_or_eof(&mut file, &mut buffer[..remaining])?;
-         validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
+        let bytes_done = (chunk - start_chunk) * chunk_size as u64;
+        let remaining = (stream_size - start_chunk * chunk_size as u64 - bytes_done)
+            .min(chunk_size as u64) as usize;
+        let read_size = read_exact_or_eof(&mut file, &mut buffer[..remaining])?;
+        validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
         total_read_size += read_size as u64;
         progress_bytes += read_size as u64;
         if chunk % 100 == 0 {
