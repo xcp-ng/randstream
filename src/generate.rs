@@ -19,8 +19,8 @@ use std::time::Instant;
 
 use crate::cli::CommonArgs;
 use crate::{
-    DIRECT_ALIGN, Progress, check_direct_alignment, direct_aligned_stream_size, log_metrics,
-    read_file_size, receive_progress,
+    DIRECT_ALIGN, PeakRate, Progress, check_direct_alignment, direct_aligned_stream_size,
+    log_summary, read_file_size, receive_progress,
 };
 
 /// Describes the logical random stream being generated
@@ -79,7 +79,7 @@ pub fn generate(args: &GenerateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
     debug!("chunk size: {chunk_size}");
     debug!("seed: {}", args.seed);
 
-    let (bytes_generated, checksum) = if let Some(file) = &args.file {
+    let (bytes_generated, checksum, peak_rate) = if let Some(file) = &args.file {
         generate_to_file(args, file, stream_size, chunk_size, buffer_size, &mut pb, &cancel)?
     } else {
         generate_to_stdout(args, stream_size, chunk_size, &mut pb)?
@@ -87,12 +87,12 @@ pub fn generate(args: &GenerateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
 
     // Check if operation was cancelled
     if cancel.load(Ordering::Relaxed) {
-        log_metrics(start, bytes_generated, "written bytes");
+        log_summary(start, bytes_generated, peak_rate);
         return Ok(130);
     }
 
     info!("checksum: {checksum:08x}");
-    log_metrics(start, bytes_generated, "written bytes");
+    log_summary(start, bytes_generated, peak_rate);
     Ok(0)
 }
 
@@ -123,7 +123,7 @@ fn generate_to_file(
     buffer_size: usize,
     pb: &mut Option<Progress>,
     cancel: &Arc<AtomicBool>,
-) -> anyhow::Result<(u64, u32)> {
+) -> anyhow::Result<(u64, u32, f64)> {
     if args.common.direct {
         check_direct_alignment(chunk_size as u64, args.position)?;
     }
@@ -177,7 +177,7 @@ fn generate_to_file(
         })
         .collect();
 
-    receive_progress(pb, &rx, tx);
+    let peak_rate = receive_progress(pb, &rx, tx);
     let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
 
     let write_bytes = thread_data.iter().map(|(b, _)| b).sum();
@@ -187,7 +187,7 @@ fn generate_to_file(
         hasher.combine(partial_hasher);
     }
 
-    Ok((write_bytes, hasher.finalize()))
+    Ok((write_bytes, hasher.finalize(), peak_rate))
 }
 
 /// Generate the thread's/range's chunks into `buffer`, which must be exactly
@@ -244,7 +244,7 @@ fn generate_to_stdout(
     stream_size: u64,
     chunk_size: usize,
     pb: &mut Option<Progress>,
-) -> anyhow::Result<(u64, u32)> {
+) -> anyhow::Result<(u64, u32, f64)> {
     debug!("number of threads: 1");
     let mut writer = io::stdout();
     let mut rng = Pcg64Mcg::seed_from_u64(args.seed);
@@ -252,16 +252,18 @@ fn generate_to_stdout(
     let mut bytes_generated: u64 = 0;
     let mut hasher = Hasher::new();
     let mut local_hasher = Hasher::new();
+    let mut peak = PeakRate::new();
     while bytes_generated < stream_size {
         let write_size = (stream_size - bytes_generated).min(chunk_size as u64) as usize;
         generate_chunk(&mut rng, &mut buffer, write_size, &mut hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         bytes_generated += write_size as u64;
+        peak.sample(bytes_generated);
         if let Some(p) = pb {
             p.tick(bytes_generated);
         }
     }
-    Ok((bytes_generated, hasher.finalize()))
+    Ok((bytes_generated, hasher.finalize(), peak.peak()))
 }
 
 pub fn generate_chunk(

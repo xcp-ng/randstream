@@ -10,7 +10,7 @@ use human_units::{FormatDuration, FormatSize as _};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 extern crate log;
-use log::debug;
+use log::{debug, info};
 
 pub mod cli;
 pub mod generate;
@@ -257,18 +257,63 @@ fn set_up_progress_bar(stream_size: Option<u64>) -> anyhow::Result<ProgressBar> 
     Ok(pb)
 }
 
-pub fn receive_progress(pb: &mut Option<Progress>, rx: &Receiver<u64>, tx: Sender<u64>) {
+/// Tracks the peak transfer rate, computed over ~1 second windows, from a
+/// stream of cumulative byte counts.
+pub struct PeakRate {
+    window_start: Instant,
+    window_start_bytes: u64,
+    peak: f64,
+}
+
+impl Default for PeakRate {
+    fn default() -> Self {
+        PeakRate { window_start: Instant::now(), window_start_bytes: 0, peak: 0.0 }
+    }
+}
+
+impl PeakRate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed the latest cumulative byte count; the peak is updated at most once
+    /// per window.
+    pub fn sample(&mut self, total_bytes: u64) {
+        let elapsed = self.window_start.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            let rate = (total_bytes - self.window_start_bytes) as f64 / elapsed.as_secs_f64();
+            self.peak = self.peak.max(rate);
+            self.window_start = Instant::now();
+            self.window_start_bytes = total_bytes;
+        }
+    }
+
+    /// The highest windowed rate observed so far, in bytes per second.
+    pub fn peak(&self) -> f64 {
+        self.peak
+    }
+}
+
+/// Drain the progress channel, update the progress display, and return the
+/// peak transfer rate (bytes/s) observed during the run.
+pub fn receive_progress(pb: &mut Option<Progress>, rx: &Receiver<u64>, tx: Sender<u64>) -> f64 {
     drop(tx);
     let mut total_bytes = 0;
+    let mut peak = PeakRate::new();
     if let Some(p) = pb {
         while let Ok(bytes) = rx.recv() {
             total_bytes += bytes;
+            peak.sample(total_bytes);
             p.tick(total_bytes);
         }
         p.finish();
     } else {
-        while rx.recv().is_ok() {}
+        while let Ok(bytes) = rx.recv() {
+            total_bytes += bytes;
+            peak.sample(total_bytes);
+        }
     }
+    peak.peak()
 }
 
 /// Log debug metrics: elapsed time, throughput, and bytes processed
@@ -283,4 +328,22 @@ pub fn log_metrics(start: Instant, bytes: u64, label: &str) {
     debug!("{label}: {bytes}");
     debug!("throughput: {}/s", throughput.format_size());
     debug!("run in {}", elapsed.format_duration());
+}
+
+/// Log an end-of-run summary at INFO level: total bytes, elapsed time, and the
+/// average and peak transfer rates.
+pub fn log_summary(start: Instant, bytes: u64, peak_rate: f64) {
+    let elapsed = start.elapsed();
+    let average =
+        if elapsed.as_secs_f64() > 0.0 { (bytes as f64 / elapsed.as_secs_f64()) as u64 } else { 0 };
+    // For runs shorter than one peak window no windowed rate is recorded;
+    // fall back to the average so `max` is never reported below it.
+    let max = (peak_rate as u64).max(average);
+    info!(
+        "summary: {} in {} - average {}/s, max {}/s",
+        bytes.format_size(),
+        elapsed.format_duration(),
+        average.format_size(),
+        max.format_size(),
+    );
 }
