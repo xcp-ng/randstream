@@ -1,11 +1,13 @@
+use aligned_vec::{AVec, RuntimeAlign};
 use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
 use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, Read, Seek};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -13,7 +15,10 @@ use std::thread;
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{Progress, log_metrics, read_exact_or_eof, read_file_size, receive_progress};
+use crate::{
+    DIRECT_ALIGN, Progress, check_direct_alignment, direct_aligned_stream_size, log_metrics,
+    read_exact_or_eof, read_file_size, receive_progress,
+};
 
 /// Validate a random stream
 ///
@@ -59,7 +64,11 @@ pub fn validate(args: &ValidateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
         debug!("position: {}", args.position);
         debug!(
             "stream size: {}",
-            if let Some(size) = args.common.size { size.to_string() } else { "∞".to_string() }
+            if let Some(size) = args.common.size {
+                size.bytes.to_string()
+            } else {
+                "∞".to_string()
+            }
         );
         debug!("chunk size: {chunk_size}");
 
@@ -86,13 +95,13 @@ pub fn validate(args: &ValidateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
 
 fn resolve_stream_size(args: &ValidateArgs, file: &Path) -> anyhow::Result<u64> {
     if let Some(size) = &args.common.size {
-        return Ok(*size);
+        return direct_aligned_stream_size(size.bytes, size.has_unit, args.common.direct);
     }
     let size = read_file_size(file)?;
     if args.position > size {
         return Err(anyhow!("The position {} is greater than the file size {size}", args.position));
     }
-    Ok(size - args.position)
+    direct_aligned_stream_size(size - args.position, false, args.common.direct)
 }
 
 fn validate_from_file(
@@ -103,6 +112,10 @@ fn validate_from_file(
     pb: &mut Option<Progress>,
     cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<(u64, u32)> {
+    if args.common.direct {
+        check_direct_alignment(chunk_size as u64, args.position)?;
+    }
+
     let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
     debug!("number of threads: {num_threads}");
 
@@ -116,7 +129,13 @@ fn validate_from_file(
             let tx = tx.clone();
             let cancel = cancel.clone();
             let position = args.position;
+            let direct = args.common.direct;
             thread::spawn(move || -> anyhow::Result<_> {
+                // One aligned buffer per thread, reused for every chunk.
+                let mut buffer = AVec::<u8, RuntimeAlign>::from_iter(
+                    DIRECT_ALIGN,
+                    std::iter::repeat_n(0u8, chunk_size),
+                );
                 let result = validate_chunk_range(
                     &file,
                     chunk_size,
@@ -125,6 +144,8 @@ fn validate_from_file(
                     num_chunks,
                     stream_size,
                     position,
+                    direct,
+                    buffer.as_mut_slice(),
                     &tx,
                     &cancel,
                 );
@@ -159,14 +180,21 @@ fn validate_chunk_range(
     num_chunks: u64,
     stream_size: u64,
     position: u64,
+    direct: bool,
+    buffer: &mut [u8],
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    let mut file = File::open(file)?;
+    debug_assert!(buffer.len() >= chunk_size);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    if direct {
+        options.custom_flags(nix::libc::O_DIRECT);
+    }
+    let mut file = options.open(file)?;
     let mut thread_hasher = Hasher::new();
     let start_chunk = thread_index * chunks_per_thread;
     let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks);
-    let mut buffer = vec![0; chunk_size];
     file.seek(io::SeekFrom::Start(position + start_chunk * chunk_size as u64))?;
     let mut total_read_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
@@ -201,7 +229,7 @@ fn validate_from_stdin(
     let mut stream_size: u64 = 0;
     let mut chunk: u64 = 0;
     let mut hasher = Hasher::new();
-    while args.common.size.map(|s| stream_size < s).unwrap_or(true) {
+    while args.common.size.map(|s| stream_size < s.bytes).unwrap_or(true) {
         let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
         if read_size == 0 {
             // End of input stream (EOF)

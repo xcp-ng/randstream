@@ -53,6 +53,64 @@ pub fn read_file_size(path: &Path) -> anyhow::Result<u64> {
     }
 }
 
+/// Alignment (in bytes) required for O_DIRECT I/O. 4096 is a safe superset of
+/// the common 512- and 4096-byte logical sector sizes.
+pub const DIRECT_ALIGN: usize = 4096;
+
+/// Round `size` down to the previous multiple of [`DIRECT_ALIGN`] so it can be
+/// used with O_DIRECT. The stream size is adjusted automatically (rather than
+/// rejected) because it is often derived from a non-aligned `--size` value.
+pub fn align_size_for_direct(size: u64) -> u64 {
+    size - size % DIRECT_ALIGN as u64
+}
+
+/// The stream size aligned for O_DIRECT. A size the user wrote with a unit
+/// suffix (`has_unit`) must already be a multiple of [`DIRECT_ALIGN`] — it is
+/// an error otherwise, so the chosen human value is not silently changed. A
+/// raw byte count (no unit, including a file-derived size) is rounded down to
+/// the nearest multiple instead — unless it is smaller than [`DIRECT_ALIGN`],
+/// which rounds to 0 and is reported as an error rather than a silent no-op.
+/// With `direct` off the size is returned as-is.
+pub fn direct_aligned_stream_size(size: u64, has_unit: bool, direct: bool) -> anyhow::Result<u64> {
+    if !direct {
+        return Ok(size);
+    }
+    let aligned = align_size_for_direct(size);
+    if aligned == size {
+        return Ok(size);
+    }
+    if has_unit {
+        return Err(anyhow::anyhow!(
+            "--direct requires the size ({size}) to be a multiple of {DIRECT_ALIGN}; \
+             use an aligned value (e.g. a `Ki`/`Mi` multiple) or pass a raw byte \
+             count to have it rounded down automatically"
+        ));
+    }
+    if aligned == 0 {
+        return Err(anyhow::anyhow!(
+            "--direct requires a size of at least {DIRECT_ALIGN} bytes, but {size} \
+             rounds down to 0"
+        ));
+    }
+    debug!("stream size {size} rounded down to {aligned} for O_DIRECT");
+    Ok(aligned)
+}
+
+/// Ensure the user-provided knobs satisfy the O_DIRECT alignment requirements,
+/// returning a helpful error otherwise (the kernel would only return a bare
+/// `EINVAL`). The stream size is handled separately by [`align_size_for_direct`].
+pub fn check_direct_alignment(chunk_size: u64, position: u64) -> anyhow::Result<()> {
+    let align = DIRECT_ALIGN as u64;
+    for (name, value) in [("chunk size", chunk_size), ("position", position)] {
+        if value % align != 0 {
+            return Err(anyhow::anyhow!(
+                "--direct requires the {name} ({value}) to be a multiple of {align}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn read_exact_or_eof(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
     let mut bytes_read = 0;
     while bytes_read < buffer.len() {

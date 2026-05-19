@@ -49,6 +49,22 @@ corrupted or altered. The validation process will **re-generate** the data
 internally using the same seed and compare it byte-for-byte with the input
 stream.
 
+### Direct I/O (`--direct`)
+
+All three commands accept `--direct` (`-D`), which opens the file or device
+with `O_DIRECT` so reads and writes bypass the kernel page cache — useful to
+measure real device throughput or to make sure validation reads the device
+rather than cached data. `O_DIRECT` requires block-aligned I/O, so:
+
+- A `--size` written **with a unit** (`5G`, `4Mi`, …) must already be a
+  multiple of 4096; otherwise the command fails fast with a clear error,
+  rather than silently changing the size you asked for.
+- A `--size` given as a **raw byte count** (and a size derived from the file)
+  is rounded **down** to the nearest multiple of 4096 automatically.
+- The chunk size and position must be multiples of 4096 (error otherwise).
+
+The option is ignored when reading from stdin or writing to stdout.
+
 ### Examples
 
 **Fill a whole block device:**

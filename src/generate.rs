@@ -1,3 +1,4 @@
+use aligned_vec::{AVec, RuntimeAlign};
 use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
@@ -9,14 +10,18 @@ use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::fs::OpenOptions;
 use std::io::{self, Seek as _, Write};
-use std::path::PathBuf;
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{Progress, log_metrics, read_file_size, receive_progress};
+use crate::{
+    DIRECT_ALIGN, Progress, check_direct_alignment, direct_aligned_stream_size, log_metrics,
+    read_file_size, receive_progress,
+};
 
 /// Describes the logical random stream being generated
 #[derive(Clone, Debug)]
@@ -26,6 +31,7 @@ struct StreamParams {
     stream_size: u64,
     chunk_size: usize,
     buffer_size: usize,
+    direct: bool,
 }
 
 /// Describes the work slice assigned to one thread
@@ -92,7 +98,7 @@ pub fn generate(args: &GenerateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
 
 fn resolve_stream_size(args: &GenerateArgs) -> anyhow::Result<u64> {
     if let Some(size) = &args.common.size {
-        return Ok(*size);
+        return direct_aligned_stream_size(size.bytes, size.has_unit, args.common.direct);
     }
     if let Some(file) = &args.file
         && file.exists()
@@ -104,7 +110,7 @@ fn resolve_stream_size(args: &GenerateArgs) -> anyhow::Result<u64> {
                 args.position
             ));
         }
-        return Ok(size - args.position);
+        return direct_aligned_stream_size(size - args.position, false, args.common.direct);
     }
     Err(anyhow!("Size can't be determined. Use --size to provide a stream size."))
 }
@@ -118,6 +124,10 @@ fn generate_to_file(
     pb: &mut Option<Progress>,
     cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<(u64, u32)> {
+    if args.common.direct {
+        check_direct_alignment(chunk_size as u64, args.position)?;
+    }
+
     // make sure the output file exists, before opening it in the threads
     let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
     // and that the file size matches the requested size
@@ -140,6 +150,7 @@ fn generate_to_file(
         stream_size,
         chunk_size,
         buffer_size,
+        direct: args.common.direct,
     };
 
     let handles: Vec<_> = (0..num_threads as u64)
@@ -149,8 +160,14 @@ fn generate_to_file(
             let cancel = cancel.clone();
             let stream = stream.clone();
             thread::spawn(move || -> anyhow::Result<_> {
+                // One aligned buffer per thread, reused for every chunk.
+                let mut buffer = AVec::<u8, RuntimeAlign>::from_iter(
+                    DIRECT_ALIGN,
+                    std::iter::repeat_n(0u8, stream.buffer_size),
+                );
                 let work = ThreadWork { thread_index: i, chunks_per_thread, num_chunks };
-                let result = write_chunk_range(&file, &stream, &work, &tx, &cancel);
+                let result =
+                    write_chunk_range(&file, &stream, &work, buffer.as_mut_slice(), &tx, &cancel);
                 if result.is_err() {
                     // tell the other threads to stop
                     cancel.store(true, Ordering::Relaxed);
@@ -173,18 +190,27 @@ fn generate_to_file(
     Ok((write_bytes, hasher.finalize()))
 }
 
+/// Generate the thread's/range's chunks into `buffer`, which must be exactly
+/// `stream.buffer_size` long and is reused across chunks (and, in `stress`,
+/// across jobs) so no allocation happens here.
 fn write_chunk_range(
-    file: &PathBuf,
+    file: &Path,
     stream: &StreamParams,
     work: &ThreadWork,
+    buffer: &mut [u8],
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    let mut writer = OpenOptions::new().write(true).open(file)?;
+    debug_assert_eq!(buffer.len(), stream.buffer_size);
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if stream.direct {
+        options.custom_flags(nix::libc::O_DIRECT);
+    }
+    let mut writer = options.open(file)?;
     let mut thread_hasher = Hasher::new();
     let mut local_hasher = Hasher::new();
     let mut rng = Pcg64Mcg::seed_from_u64(stream.seed);
-    let mut buffer = vec![0; stream.buffer_size];
     let start_chunk = work.thread_index * work.chunks_per_thread;
     let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks);
     writer.seek(io::SeekFrom::Start(stream.position + start_chunk * stream.chunk_size as u64))?;
@@ -198,7 +224,7 @@ fn write_chunk_range(
     for chunk in start_chunk..end_chunk {
         let write_size = (stream.stream_size - chunk * stream.chunk_size as u64)
             .min(stream.chunk_size as u64) as usize;
-        generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher, &mut local_hasher);
+        generate_chunk(&mut rng, buffer, write_size, &mut thread_hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         total_write_size += write_size as u64;
         progress_bytes += write_size as u64;

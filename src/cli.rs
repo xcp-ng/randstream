@@ -19,13 +19,27 @@ pub struct Cli {
     pub verbose: Verbosity<InfoLevel>,
 }
 
+/// A `--size` value, remembering whether the user wrote it with a unit suffix
+/// (`5G`, `4Mi`, …) or as a plain byte count. With `--direct` the two are
+/// treated differently: a unit size must already be 4096-aligned, while a raw
+/// byte count is rounded down automatically.
+#[derive(Clone, Copy, Debug)]
+pub struct Size {
+    pub bytes: u64,
+    pub has_unit: bool,
+}
+
+fn parse_size_arg(s: &str) -> Result<Size, parse_size::Error> {
+    Ok(Size { bytes: parse_size(s)?, has_unit: s.chars().any(|c| c.is_ascii_alphabetic()) })
+}
+
 #[derive(Args, Debug)]
 pub struct CommonArgs {
     /// The stream size
     ///
     /// Defaults to the provided file size
-    #[clap(short, long, value_parser=|s: &str| parse_size(s))]
-    pub size: Option<u64>,
+    #[clap(short, long, value_parser = parse_size_arg)]
+    pub size: Option<Size>,
 
     /// The number of parallel jobs
     ///
@@ -40,6 +54,13 @@ pub struct CommonArgs {
     /// Hide the progress bar
     #[clap(short = 'P', long)]
     pub no_progress: bool,
+
+    /// Open the file or device with O_DIRECT (bypass the page cache)
+    ///
+    /// Requires the chunk size, position and stream size to all be multiples
+    /// of 4096. Ignored when reading from stdin or writing to stdout.
+    #[clap(short = 'D', long)]
+    pub direct: bool,
 }
 
 #[derive(Subcommand, Debug)]
