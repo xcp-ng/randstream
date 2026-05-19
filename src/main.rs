@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use randstream::cli;
 
 use randstream::generate::generate;
+use randstream::stress::stress;
 use randstream::validate::validate;
 
 fn run() -> anyhow::Result<i32> {
@@ -28,6 +29,7 @@ fn run() -> anyhow::Result<i32> {
     match &cli.command.unwrap() {
         cli::Commands::Generate(args) => generate(args, cancel),
         cli::Commands::Validate(args) => validate(args, cancel),
+        cli::Commands::Stress(args) => stress(args, cancel),
     }
 }
 

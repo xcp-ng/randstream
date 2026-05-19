@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use parse_size::parse_size;
 
-use crate::{generate::GenerateArgs, validate::ValidateArgs};
+use crate::{generate::GenerateArgs, stress::StressArgs, validate::ValidateArgs};
 
 /// This utility creates and validate a random stream of data with built-in validation.
 ///
@@ -67,6 +67,7 @@ pub struct CommonArgs {
 pub enum Commands {
     Generate(GenerateArgs),
     Validate(ValidateArgs),
+    Stress(StressArgs),
 }
 
 #[test]

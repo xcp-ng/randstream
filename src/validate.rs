@@ -172,7 +172,7 @@ fn validate_from_file(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_chunk_range(
+pub(crate) fn validate_chunk_range(
     file: &Path,
     chunk_size: usize,
     thread_index: u64,
@@ -211,8 +211,17 @@ fn validate_chunk_range(
             progress_bytes = 0;
         }
         if cancel.load(Ordering::Relaxed) {
+            if progress_bytes > 0 {
+                tx.send(progress_bytes)?;
+            }
             return Ok((total_read_size, thread_hasher));
         }
+    }
+    // Flush the bytes accumulated since the last `% 100` checkpoint. Ranges
+    // shorter than the sampling stride (e.g. `stress`'s small ranges) would
+    // otherwise report little or no progress at all.
+    if progress_bytes > 0 {
+        tx.send(progress_bytes)?;
     }
     Ok((total_read_size, thread_hasher))
 }

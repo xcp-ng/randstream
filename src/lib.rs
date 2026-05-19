@@ -14,6 +14,7 @@ use log::{debug, info};
 
 pub mod cli;
 pub mod generate;
+pub mod stress;
 pub mod validate;
 
 #[cfg(target_os = "linux")]

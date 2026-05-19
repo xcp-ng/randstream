@@ -30,7 +30,8 @@ cargo install randstream
 
 ## Usage
 
-`randstream` has two main commands: **`generate`** and **`validate`**.
+`randstream` has three commands: **`generate`**, **`validate`** and
+**`stress`**.
 
 ### Generating a Random Stream (`generate`)
 
@@ -48,6 +49,23 @@ Use the `validate` command to verify that an existing stream has not been
 corrupted or altered. The validation process will **re-generate** the data
 internally using the same seed and compare it byte-for-byte with the input
 stream.
+
+### Stressing a Device (`stress`)
+
+Use the `stress` command to continuously exercise a file or block device by
+generating **and** validating it in a loop, until interrupted with `Ctrl-C`.
+
+The stream is split into fixed-size ranges (1 MiB by default, see
+`--range-size`). Every worker thread independently picks a range to either
+(re)generate or validate; a range is only ever validated once it has already
+been generated, so validation always runs against data that was written first.
+Once every range has been generated, a **new random seed** is drawn and the
+whole stream is regenerated from scratch, so the device keeps seeing fresh data
+over time. The seed is chosen randomly (there is no `--seed` option).
+
+A live indicator reports the current bandwidth, the number of generated and
+verified chunks, and how many seeds have been used so far. Use `--no-progress`
+to disable it.
 
 ### Direct I/O (`--direct`)
 
@@ -83,4 +101,22 @@ randstream generate --size 100G --seed 12345678 --jobs 2 output.bin
 
 ```bash
 randstream validate output.bin
+```
+
+**Stress a block device until interrupted (`Ctrl-C`):**
+
+```bash
+randstream stress /dev/xvdb
+```
+
+**Stress a block device for 60 seconds:**
+
+```bash
+timeout 60 randstream stress /dev/xvdb
+```
+
+**Stress a 50 GB file using 4 threads and 4 MiB ranges:**
+
+```bash
+randstream stress --size 50G --jobs 4 --range-size 4Mi stress.bin
 ```

@@ -25,21 +25,21 @@ use crate::{
 
 /// Describes the logical random stream being generated
 #[derive(Clone, Debug)]
-struct StreamParams {
-    seed: u64,
-    position: u64,
-    stream_size: u64,
-    chunk_size: usize,
-    buffer_size: usize,
-    direct: bool,
+pub(crate) struct StreamParams {
+    pub(crate) seed: u64,
+    pub(crate) position: u64,
+    pub(crate) stream_size: u64,
+    pub(crate) chunk_size: usize,
+    pub(crate) buffer_size: usize,
+    pub(crate) direct: bool,
 }
 
 /// Describes the work slice assigned to one thread
 #[derive(Clone, Debug)]
-struct ThreadWork {
-    thread_index: u64,
-    chunks_per_thread: u64,
-    num_chunks: u64,
+pub(crate) struct ThreadWork {
+    pub(crate) thread_index: u64,
+    pub(crate) chunks_per_thread: u64,
+    pub(crate) num_chunks: u64,
 }
 
 /// Generate a random stream
@@ -193,7 +193,7 @@ fn generate_to_file(
 /// Generate the thread's/range's chunks into `buffer`, which must be exactly
 /// `stream.buffer_size` long and is reused across chunks (and, in `stress`,
 /// across jobs) so no allocation happens here.
-fn write_chunk_range(
+pub(crate) fn write_chunk_range(
     file: &Path,
     stream: &StreamParams,
     work: &ThreadWork,
@@ -233,8 +233,17 @@ fn write_chunk_range(
             progress_bytes = 0;
         }
         if cancel.load(Ordering::Relaxed) {
+            if progress_bytes > 0 {
+                tx.send(progress_bytes)?;
+            }
             return Ok((total_write_size, thread_hasher));
         }
+    }
+    // Flush the bytes accumulated since the last `% 100` checkpoint. Ranges
+    // shorter than the sampling stride (e.g. `stress`'s small ranges) would
+    // otherwise report little or no progress at all.
+    if progress_bytes > 0 {
+        tx.send(progress_bytes)?;
     }
     Ok((total_write_size, thread_hasher))
 }
