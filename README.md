@@ -36,6 +36,12 @@ cargo install randstream
 
 Use the generate command to create a reproducible stream of pseudo-random data.
 
+When writing to a file or block device, generation is **multithreaded by
+default**: the work is split across all physical CPU cores of the host. Use
+`--jobs` to set an explicit number of parallel tasks. The output is identical
+regardless of the number of tasks. Streaming to standard output is
+single-threaded.
+
 ### Validating a Random Stream (`validate`)
 
 Use the `validate` command to verify that an existing stream has not been
