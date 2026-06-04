@@ -27,7 +27,7 @@ ctrlc = "3.4.4"
 human-units = "0.5.3"
 indicatif = "0.18.4"
 itertools = "0.14.0"
-log = "0.4.29"
+log = "0.4.30"
 nix = { version = "0.31.3", features = ["ioctl"] }
 num_cpus = "1.17.0"
 ocli = "0.3.0"
