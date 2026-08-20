@@ -11,6 +11,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
 
 permissions:
   contents: read
@@ -29,7 +30,8 @@ jobs:
 
       - uses: bencherdev/bencher@5cf72bead6e01cf7473d6ecd474c0e118ca6b858
 
-      - run: |
+      - if: ${{ env.BENCHER_API_TOKEN != '' }}
+        run: |
           bencher run \
             --project randstream \
             --branch "$GITHUB_REF_NAME" \
@@ -38,6 +40,8 @@ jobs:
             --github-actions "$GITHUB_TOKEN" \
             cargo bench --features=benchmark
         env:
-          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
+
+      - if: ${{ env.BENCHER_API_TOKEN == '' }}
+        run: cargo bench --features=benchmark
