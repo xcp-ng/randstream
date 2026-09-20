@@ -28,7 +28,7 @@ jobs:
 
       - run: rustup install stable
 
-      - uses: bencherdev/bencher@225c420ad282324bcb4aaec896b616cd14eab642
+      - uses: bencherdev/bencher@b97d2fc1a1090e8b1c7e95c9a9f354e5cd85f2a7
 
       - if: ${{ env.BENCHER_API_TOKEN != '' }}
         run: |
