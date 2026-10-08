@@ -30,7 +30,7 @@ pub struct CommonArgs {
     /// The number of parallel jobs
     ///
     /// Defaults to the number of physical cores on the host
-    #[clap(short, long)]
+    #[clap(short, long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     pub jobs: Option<usize>,
 
     /// The chunk size

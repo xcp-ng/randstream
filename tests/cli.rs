@@ -239,6 +239,8 @@ fn errors() {
         (&["generate", "--does-not-exist"], 2, "unexpected argument"),
         (&["generate", "-s", "1Ki", "-p", "0"], 2, "required arguments were not provided"),
         (&["generate", "-s", "nope", "out.bin"], 2, "invalid value"),
+        (&["generate", "-j", "0", "-s", "1Ki", "out.bin"], 2, "invalid value '0'"),
+        (&["validate", "-j", "0", "small.bin"], 2, "invalid value '0'"),
         // runtime errors
         (&["generate", "missing.bin"], 1, "Size can't be determined"),
         (&["generate", "-p", "64Ki", "small.bin"], 1, "greater than the file size"),
