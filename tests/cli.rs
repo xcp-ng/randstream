@@ -202,6 +202,13 @@ fn size_defaults_to_the_file_size() {
     assert_eq!(g.checksum(), v.checksum());
 }
 
+/// Character devices can't be synced, but can be written to
+#[test]
+fn generate_to_character_device() {
+    let dir = TempDir::new().unwrap();
+    randstream(dir.path(), &["generate", "-s", "64Ki", "/dev/null"], None).success();
+}
+
 #[test]
 fn truncation() {
     let dir = TempDir::new().unwrap();

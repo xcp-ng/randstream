@@ -116,9 +116,23 @@ fn generate_to_file(
 
     let layout =
         Layout { position: args.position, stream_size, chunk_size: args.common.chunk_size };
-    process_in_parallel(layout.num_chunks(), args.common.num_threads(), pb, cancel, |chunks, tx| {
-        write_chunk_range(file, &layout, args.seed, buffer_size, chunks, tx, cancel)
-    })
+    let result = process_in_parallel(
+        layout.num_chunks(),
+        args.common.num_threads(),
+        pb,
+        cancel,
+        |chunks, tx| write_chunk_range(file, &layout, args.seed, buffer_size, chunks, tx, cancel),
+    )?;
+
+    // make sure the data reached the device, and report the errors happening
+    // while writing it back. Character devices can't be synced.
+    if !cancel.load(Ordering::Relaxed)
+        && let Err(err) = f.sync_data()
+        && err.kind() != io::ErrorKind::InvalidInput
+    {
+        return Err(err.into());
+    }
+    Ok(result)
 }
 
 fn write_chunk_range(
