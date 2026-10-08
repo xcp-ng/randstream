@@ -9,6 +9,7 @@ use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::fs::OpenOptions;
 use std::io::{self, Seek as _, Write};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -128,7 +129,7 @@ fn generate_to_file(
         }
     }
 
-    let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
+    let num_threads = args.common.jobs.map_or(num_cpus::get_physical(), NonZeroUsize::get);
     debug!("number of threads: {num_threads}");
     let num_chunks = stream_size.div_ceil(chunk_size as u64);
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);

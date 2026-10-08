@@ -6,6 +6,7 @@ use log::{debug, info};
 use parse_size::parse_size;
 use std::fs::File;
 use std::io::{self, Read, Seek};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -103,7 +104,7 @@ fn validate_from_file(
     pb: &mut Option<Progress>,
     cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<(u64, u32)> {
-    let num_threads = args.common.jobs.unwrap_or(num_cpus::get_physical());
+    let num_threads = args.common.jobs.map_or(num_cpus::get_physical(), NonZeroUsize::get);
     debug!("number of threads: {num_threads}");
 
     let num_chunks = stream_size.div_ceil(chunk_size as u64);

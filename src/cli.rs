@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use parse_size::parse_size;
@@ -30,8 +32,8 @@ pub struct CommonArgs {
     /// The number of parallel jobs
     ///
     /// Defaults to the number of physical cores on the host
-    #[clap(short, long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
-    pub jobs: Option<usize>,
+    #[clap(short, long)]
+    pub jobs: Option<NonZeroUsize>,
 
     /// The chunk size
     #[clap(short, long, default_value = "32ki", value_parser=|s: &str| parse_size(s))]
