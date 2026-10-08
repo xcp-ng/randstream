@@ -63,7 +63,7 @@ pub fn validate(args: &ValidateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
         );
         debug!("chunk size: {chunk_size}");
 
-        validate_from_stdin(args, chunk_size, &mut pb)?
+        validate_from_stdin(args, chunk_size, &mut pb, &cancel)?
     };
 
     // Check if operation was cancelled
@@ -198,6 +198,7 @@ fn validate_from_stdin(
     args: &ValidateArgs,
     chunk_size: usize,
     pb: &mut Option<Progress>,
+    cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, u32)> {
     debug!("number of threads: 1");
     // discard the first values up to position
@@ -222,6 +223,9 @@ fn validate_from_stdin(
         chunk += 1;
         if let Some(p) = pb {
             p.tick(stream_size);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            break;
         }
     }
     Ok((stream_size, hasher.finalize()))

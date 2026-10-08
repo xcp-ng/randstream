@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -252,20 +253,44 @@ fn errors() {
     }
 }
 
-/// SIGINT stops the workers and exits with the conventional 130 code
+/// SIGINT stops the stream and exits with the conventional 130 code
 #[test]
 fn interrupt() {
     let dir = TempDir::new().unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_randstream"))
-        .current_dir(dir.path())
-        .args(["generate", "-s", "100G", "out.bin"])
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
-    let status = child.wait_with_output().unwrap().status;
-    assert_eq!(status.code(), Some(130));
+    let spawn = |args: &[&str], stdin: Stdio, stdout: Stdio| {
+        Command::new(env!("CARGO_BIN_EXE_randstream"))
+            .current_dir(dir.path())
+            .args(args)
+            .stdin(stdin)
+            .stdout(stdout)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut source = spawn(&["generate", "-s", "100G"], Stdio::null(), Stdio::piped());
+    let children = [
+        (
+            "generate to file",
+            spawn(&["generate", "-s", "100G", "out.bin"], Stdio::null(), Stdio::null()),
+        ),
+        ("generate to stdout", spawn(&["generate", "-s", "100G"], Stdio::null(), Stdio::null())),
+        (
+            "validate from stdin",
+            spawn(&["validate"], source.stdout.take().unwrap().into(), Stdio::null()),
+        ),
+    ];
+    std::thread::sleep(Duration::from_millis(500));
+    for (what, mut child) in children {
+        Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        assert_eq!(child.wait().unwrap().code(), Some(130), "{what}");
+    }
+    source.kill().unwrap();
+    source.wait().unwrap();
 }
 
 #[test]

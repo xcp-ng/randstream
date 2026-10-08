@@ -76,7 +76,7 @@ pub fn generate(args: &GenerateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
     let (bytes_generated, checksum) = if let Some(file) = &args.file {
         generate_to_file(args, file, stream_size, chunk_size, buffer_size, &mut pb, &cancel)?
     } else {
-        generate_to_stdout(args, stream_size, chunk_size, &mut pb)?
+        generate_to_stdout(args, stream_size, chunk_size, &mut pb, &cancel)?
     };
 
     // Check if operation was cancelled
@@ -218,6 +218,7 @@ fn generate_to_stdout(
     stream_size: u64,
     chunk_size: usize,
     pb: &mut Option<Progress>,
+    cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, u32)> {
     debug!("number of threads: 1");
     let mut writer = io::stdout();
@@ -233,6 +234,9 @@ fn generate_to_stdout(
         bytes_generated += write_size as u64;
         if let Some(p) = pb {
             p.tick(bytes_generated);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            break;
         }
     }
     Ok((bytes_generated, hasher.finalize()))
