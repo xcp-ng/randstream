@@ -81,13 +81,6 @@ pub enum Progress {
     Log(LogProgress),
 }
 
-/// Metrics wrapper for tracking elapsed time, bytes processed, and throughput
-pub struct Metrics {
-    pub progress: Option<Progress>,
-    pub start_time: Instant,
-    pub bytes_processed: u64,
-}
-
 impl Progress {
     /// Create a new progress tracker. Returns `None` if progress is disabled or cannot be tracked.
     pub fn new(stream_size: Option<u64>, no_progress: bool) -> anyhow::Result<Option<Self>> {
@@ -125,31 +118,6 @@ impl Progress {
         if let Progress::Bar(pb) = self {
             pb.finish_and_clear();
         }
-    }
-}
-
-impl Metrics {
-    /// Create a new metrics tracker
-    pub fn new(stream_size: Option<u64>, no_progress: bool) -> anyhow::Result<Self> {
-        Ok(Metrics {
-            progress: Progress::new(stream_size, no_progress)?,
-            start_time: Instant::now(),
-            bytes_processed: 0,
-        })
-    }
-
-    /// Format and log interrupt summary at DEBUG level
-    pub fn log_interrupt_summary(&self) {
-        let elapsed = self.start_time.elapsed();
-        let throughput = if elapsed.as_secs_f64() > 0.0 {
-            (self.bytes_processed as f64 / elapsed.as_secs_f64()) as usize
-        } else {
-            0
-        };
-
-        debug!("Total time: {}", elapsed.format_duration());
-        debug!("Throughput: {}/s", throughput.format_size());
-        debug!("Total bytes written/read: {}", self.bytes_processed.format_size());
     }
 }
 
