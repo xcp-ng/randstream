@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use clap::Args;
 use crc32fast::Hasher;
 use log::{debug, info};
@@ -122,20 +122,24 @@ fn validate_from_file(
 }
 
 fn validate_chunk_range(
-    file: &Path,
+    path: &Path,
     layout: &Layout,
     chunks: Range<u64>,
     progress: &mut ThreadProgress,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    let mut file = File::open(file)?;
+    let mut file = File::open(path).with_context(|| format!("Can't open {}", path.display()))?;
     let mut thread_hasher = Hasher::new();
     let mut buffer = vec![0; layout.chunk_size as usize];
-    file.seek(io::SeekFrom::Start(layout.offset(chunks.start)))?;
+    file.seek(io::SeekFrom::Start(layout.offset(chunks.start)))
+        .with_context(|| format!("Can't seek in {}", path.display()))?;
     let mut total_read_size: u64 = 0;
     for chunk in chunks {
         let expected = layout.chunk_len(chunk);
-        let read_size = read_exact_or_eof(&mut file, &mut buffer[..expected])?;
+        let read_size =
+            read_exact_or_eof(&mut file, &mut buffer[..expected]).with_context(|| {
+                format!("Can't read {} at offset {}", path.display(), layout.offset(chunk))
+            })?;
         if read_size < expected {
             return Err(anyhow!(
                 "Unexpected end of stream at chunk {chunk}. Expected {expected} bytes, found {read_size}."
@@ -159,13 +163,15 @@ fn validate_from_stdin(
 ) -> anyhow::Result<(u64, u32)> {
     debug!("number of threads: 1");
     // discard the first values up to position
-    io::copy(&mut io::stdin().take(args.position), &mut io::sink())?;
+    io::copy(&mut io::stdin().take(args.position), &mut io::sink())
+        .context("Can't read from stdin")?;
     let mut buffer = vec![0; chunk_size];
     let mut stream_size: u64 = 0;
     let mut chunk: u64 = 0;
     let mut hasher = Hasher::new();
     while args.common.size.map(|s| stream_size < s).unwrap_or(true) {
-        let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
+        let read_size =
+            read_exact_or_eof(&mut io::stdin(), &mut buffer).context("Can't read from stdin")?;
         if let Some(size) = args.common.size {
             let expected = (size - stream_size).min(chunk_size as u64) as usize;
             if read_size < expected {

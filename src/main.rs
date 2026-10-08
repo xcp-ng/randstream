@@ -35,7 +35,7 @@ fn main() {
     match run() {
         Ok(exit_code) => std::process::exit(exit_code),
         Err(err) => {
-            error!("{err}");
+            error!("{err:#}");
             std::process::exit(1);
         }
     }

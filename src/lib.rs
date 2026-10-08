@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::{io::Read, os::unix::fs::FileTypeExt, path::Path};
 
+use anyhow::{Context as _, anyhow};
 use crc32fast::Hasher;
 use human_units::{FormatDuration, FormatSize as _};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -34,27 +35,35 @@ mod blk {
 }
 
 pub fn read_file_size(path: &Path) -> anyhow::Result<u64> {
-    let file_type = std::fs::metadata(path)?.file_type();
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("Can't open {}", path.display()))?;
+    let file_type = metadata.file_type();
     if file_type.is_block_device() || file_type.is_char_device() {
-        let file = File::open(path)?;
+        let file = File::open(path).with_context(|| format!("Can't open {}", path.display()))?;
         let fd = file.as_raw_fd();
+        let size_error = |errno: nix::errno::Errno| {
+            anyhow!(
+                "Can't determine the size of {}: {}. Use --size to provide a stream size.",
+                path.display(),
+                io::Error::from_raw_os_error(errno as i32)
+            )
+        };
 
         #[cfg(target_os = "linux")]
         unsafe {
             let mut size: u64 = 0;
-            blk::blkgetsize64(fd, &mut size).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+            blk::blkgetsize64(fd, &mut size).map_err(size_error)?;
             Ok(size)
         }
 
         #[cfg(target_os = "freebsd")]
         unsafe {
             let mut size: u64 = 0;
-            blk::diocgmediasize(fd, &mut size)
-                .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+            blk::diocgmediasize(fd, &mut size).map_err(size_error)?;
             Ok(size)
         }
     } else {
-        Ok(path.metadata()?.len())
+        Ok(metadata.len())
     }
 }
 

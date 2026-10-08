@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use clap::Args;
 use crc32fast::Hasher;
 use log::{debug, info};
@@ -110,12 +110,17 @@ fn generate_to_file(
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, u32)> {
     // make sure the output file exists, before opening it in the threads
-    let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(file)
+        .with_context(|| format!("Can't open {}", file.display()))?;
     // and that the file size matches the requested size
     if file.is_file() {
         let end_position = stream_size + args.position;
         if end_position > f.metadata()?.len() || !args.no_truncate {
-            f.set_len(end_position)?;
+            f.set_len(end_position).with_context(|| format!("Can't resize {}", file.display()))?;
         }
     }
 
@@ -137,7 +142,7 @@ fn generate_to_file(
         && let Err(err) = f.sync_data()
         && err.kind() != io::ErrorKind::InvalidInput
     {
-        return Err(err.into());
+        return Err(err).with_context(|| format!("Can't sync {}", file.display()));
     }
     Ok(result)
 }
@@ -151,12 +156,17 @@ fn write_chunk_range(
     progress: &mut ThreadProgress,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    let mut writer = OpenOptions::new().write(true).open(file)?;
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .open(file)
+        .with_context(|| format!("Can't open {}", file.display()))?;
     let mut thread_hasher = Hasher::new();
     let mut local_hasher = Hasher::new();
     let mut rng = Pcg64Mcg::seed_from_u64(seed);
     let mut buffer = vec![0; buffer_size];
-    writer.seek(io::SeekFrom::Start(layout.offset(chunks.start)))?;
+    writer
+        .seek(io::SeekFrom::Start(layout.offset(chunks.start)))
+        .with_context(|| format!("Can't seek in {}", file.display()))?;
     let advance_amount =
         chunks.start.checked_mul(buffer_size as u64).ok_or_else(|| {
             anyhow!("arithmetic overflow: start_chunk * buffer_size exceeds u64 max")
@@ -166,7 +176,9 @@ fn write_chunk_range(
     for chunk in chunks {
         let write_size = layout.chunk_len(chunk);
         generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher, &mut local_hasher);
-        writer.write_all(&buffer[..write_size])?;
+        writer.write_all(&buffer[..write_size]).with_context(|| {
+            format!("Can't write to {} at offset {}", file.display(), layout.offset(chunk))
+        })?;
         total_write_size += write_size as u64;
         progress.add(write_size);
         if cancel.load(Ordering::Relaxed) {
@@ -193,7 +205,7 @@ fn generate_to_stdout(
     while bytes_generated < stream_size {
         let write_size = (stream_size - bytes_generated).min(chunk_size as u64) as usize;
         generate_chunk(&mut rng, &mut buffer, write_size, &mut hasher, &mut local_hasher);
-        writer.write_all(&buffer[..write_size])?;
+        writer.write_all(&buffer[..write_size]).context("Can't write to stdout")?;
         bytes_generated += write_size as u64;
         if let Some(p) = pb {
             p.tick(bytes_generated);

@@ -340,7 +340,9 @@ fn errors() {
         (&["generate", "missing.bin"], 1, "Size can't be determined"),
         (&["generate", "-p", "64Ki", "small.bin"], 1, "greater than the file size"),
         (&["validate", "-p", "64Ki", "small.bin"], 1, "greater than the file size"),
-        (&["validate", "missing.bin"], 1, "No such file or directory"),
+        (&["validate", "missing.bin"], 1, "Can't open missing.bin: No such file or directory"),
+        (&["generate", "-s", "1Ki", "nodir/out.bin"], 1, "Can't open nodir/out.bin: No such file"),
+        (&["generate", "/dev/null"], 1, "Can't determine the size of /dev/null"),
         (&["generate", "-s", "18446744073709551615", "-p", "1", "out.bin"], 1, "is too large"),
         (&["validate", "-s", "18446744073709551615", "-p", "1", "small.bin"], 1, "is too large"),
     ];
