@@ -280,17 +280,25 @@ fn validate_detects_corruption() {
     }
 }
 
+/// A stream shorter than --size is reported the same way from a file or stdin
 #[test]
 fn validate_detects_stream_shorter_than_size() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    randstream(d, &["generate", "-s", "32Ki", "out.bin"], None).success();
-    let data = fs::read(d.join("out.bin")).unwrap();
-    let message = "Unexpected end of stream at chunk 1";
-    for jobs in ["1", "2"] {
-        randstream(d, &["validate", "-s", "64Ki", "-j", jobs, "out.bin"], None).failure(1, message);
+    let cases = [
+        ("32Ki", "at chunk 1. Expected 32768 bytes, found 0."), // ends on a chunk boundary
+        ("50Ki", "at chunk 1. Expected 32768 bytes, found 18432."), // ends mid chunk
+    ];
+    for (size, message) in cases {
+        let dir = TempDir::new().unwrap();
+        let d = dir.path();
+        randstream(d, &["generate", "-s", size, "out.bin"], None).success();
+        let data = fs::read(d.join("out.bin")).unwrap();
+        let message = format!("Unexpected end of stream {message}");
+        for jobs in ["1", "2"] {
+            randstream(d, &["validate", "-s", "64Ki", "-j", jobs, "out.bin"], None)
+                .failure(1, &message);
+        }
+        randstream(d, &["validate", "-s", "64Ki"], Some(&data)).failure(1, &message);
     }
-    randstream(d, &["validate", "-s", "64Ki"], Some(&data)).failure(1, message);
 }
 
 #[test]

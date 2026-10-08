@@ -210,13 +210,16 @@ fn validate_from_stdin(
     let mut hasher = Hasher::new();
     while args.common.size.map(|s| stream_size < s).unwrap_or(true) {
         let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
-        if read_size == 0 {
-            // End of input stream (EOF)
-            if let Some(size) = args.common.size {
+        if let Some(size) = args.common.size {
+            let expected = (size - stream_size).min(chunk_size as u64) as usize;
+            if read_size < expected {
                 return Err(anyhow!(
-                    "Unexpected end of stream at chunk {chunk}. Expected {size} bytes, found {stream_size}."
+                    "Unexpected end of stream at chunk {chunk}. Expected {expected} bytes, found {read_size}."
                 ));
             }
+        }
+        if read_size == 0 {
+            // End of input stream (EOF)
             break;
         }
         validate_chunk(chunk, &buffer[..read_size], &mut hasher)?;
