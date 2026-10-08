@@ -318,6 +318,8 @@ fn errors() {
         (&["generate", "-s", "nope", "out.bin"], 2, "invalid value"),
         (&["generate", "-j", "0", "-s", "1Ki", "out.bin"], 2, "number would be zero"),
         (&["validate", "-j", "0", "small.bin"], 2, "number would be zero"),
+        (&["generate", "-c", "0", "-s", "1Ki", "out.bin"], 2, "must be at least 5 bytes"),
+        (&["validate", "-c", "4", "small.bin"], 2, "must be at least 5 bytes"),
         // runtime errors
         (&["generate", "missing.bin"], 1, "Size can't be determined"),
         (&["generate", "-p", "64Ki", "small.bin"], 1, "greater than the file size"),

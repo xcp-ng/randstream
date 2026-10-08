@@ -36,12 +36,25 @@ pub struct CommonArgs {
     pub jobs: Option<NonZeroUsize>,
 
     /// The chunk size
-    #[clap(short, long, default_value = "32ki", value_parser=|s: &str| parse_size(s))]
+    ///
+    /// Each chunk ends with a 4 bytes checksum, so it must be at least 5 bytes long
+    #[clap(short, long, default_value = "32ki", value_parser=parse_chunk_size)]
     pub chunk_size: u64,
 
     /// Hide the progress bar
     #[clap(short = 'P', long)]
     pub no_progress: bool,
+}
+
+/// The smallest chunk with some random data in addition to its checksum
+const MIN_CHUNK_SIZE: u64 = 5;
+
+fn parse_chunk_size(s: &str) -> Result<u64, String> {
+    let size = parse_size(s).map_err(|e| e.to_string())?;
+    if size < MIN_CHUNK_SIZE {
+        return Err(format!("must be at least {MIN_CHUNK_SIZE} bytes"));
+    }
+    Ok(size)
 }
 
 #[derive(Subcommand, Debug)]
