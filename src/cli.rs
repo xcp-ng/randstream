@@ -15,7 +15,7 @@ use crate::{generate::GenerateArgs, validate::ValidateArgs};
 #[command(author, version, about, long_about = None, arg_required_else_help = true)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Option<Commands>,
+    pub command: Commands,
 
     #[command(flatten)]
     pub verbose: Verbosity<InfoLevel>,

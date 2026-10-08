@@ -321,6 +321,7 @@ fn errors() {
     let cases: &[(&[&str], i32, &str)] = &[
         // usage errors
         (&[], 2, "Usage"),
+        (&["-v"], 2, "requires a subcommand"),
         (&["generate", "--does-not-exist"], 2, "unexpected argument"),
         (&["generate", "-s", "1Ki", "-p", "0"], 2, "required arguments were not provided"),
         (&["generate", "-s", "nope", "out.bin"], 2, "invalid value"),

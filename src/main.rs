@@ -25,7 +25,7 @@ fn run() -> anyhow::Result<i32> {
         cancel_clone.store(true, Ordering::Relaxed);
     })?;
 
-    match &cli.command.unwrap() {
+    match &cli.command {
         cli::Commands::Generate(args) => generate(args, cancel),
         cli::Commands::Validate(args) => validate(args, cancel),
     }
