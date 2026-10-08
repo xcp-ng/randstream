@@ -1,13 +1,18 @@
 use std::fs::File;
 use std::io;
 use std::io::IsTerminal as _;
+use std::ops::Range;
 use std::os::fd::AsRawFd as _;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use std::time::{Duration, Instant};
 use std::{io::Read, os::unix::fs::FileTypeExt, path::Path};
 
+use crc32fast::Hasher;
 use human_units::{FormatDuration, FormatSize as _};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use itertools::Itertools as _;
 
 extern crate log;
 use log::debug;
@@ -167,7 +172,80 @@ fn set_up_progress_bar(stream_size: Option<u64>) -> anyhow::Result<ProgressBar> 
     Ok(pb)
 }
 
-pub fn receive_progress(pb: &mut Option<Progress>, rx: &Receiver<u64>, tx: Sender<u64>) {
+/// How a stream is split in chunks, and where it is located in a file
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    pub position: u64,
+    pub stream_size: u64,
+    pub chunk_size: u64,
+}
+
+impl Layout {
+    pub fn num_chunks(&self) -> u64 {
+        self.stream_size.div_ceil(self.chunk_size)
+    }
+
+    /// The length of a chunk, shorter than the chunk size for the last one
+    pub fn chunk_len(&self, chunk: u64) -> usize {
+        (self.stream_size - chunk * self.chunk_size).min(self.chunk_size) as usize
+    }
+
+    /// The offset of a chunk in the file
+    pub fn offset(&self, chunk: u64) -> u64 {
+        self.position + chunk * self.chunk_size
+    }
+}
+
+/// Process the chunks in parallel, each thread working on a contiguous range
+/// of chunks, and return the number of bytes processed and the stream checksum
+///
+/// `work` processes a range of chunks, sends its progress in bytes, and returns
+/// the number of bytes processed and the checksum of the range.
+pub fn process_in_parallel(
+    num_chunks: u64,
+    num_threads: usize,
+    pb: &mut Option<Progress>,
+    cancel: &AtomicBool,
+    work: impl Fn(Range<u64>, &Sender<u64>) -> anyhow::Result<(u64, Hasher)> + Sync,
+) -> anyhow::Result<(u64, u32)> {
+    debug!("number of threads: {num_threads}");
+    let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
+    let (tx, rx) = mpsc::channel::<u64>();
+    thread::scope(|s| {
+        let handles: Vec<_> = (0..num_threads as u64)
+            .map(|i| {
+                let tx = tx.clone();
+                let work = &work;
+                let chunks = (i * chunks_per_thread).min(num_chunks)
+                    ..((i + 1) * chunks_per_thread).min(num_chunks);
+                s.spawn(move || {
+                    let result = work(chunks, &tx);
+                    if result.is_err() {
+                        // tell the other threads to stop
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    result
+                })
+            })
+            .collect();
+
+        receive_progress(pb, &rx, tx);
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
+
+        let bytes = results.iter().map(|(b, _)| b).sum();
+        let hasher = results
+            .into_iter()
+            .map(|(_, h)| h)
+            .reduce(|mut hasher, h| {
+                hasher.combine(&h);
+                hasher
+            })
+            .unwrap_or_default();
+        Ok((bytes, hasher.finalize()))
+    })
+}
+
+fn receive_progress(pb: &mut Option<Progress>, rx: &Receiver<u64>, tx: Sender<u64>) {
     drop(tx);
     let mut total_bytes = 0;
     if let Some(p) = pb {

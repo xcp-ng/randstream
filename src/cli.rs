@@ -57,6 +57,12 @@ fn parse_chunk_size(s: &str) -> Result<u64, String> {
     Ok(size)
 }
 
+impl CommonArgs {
+    pub fn num_threads(&self) -> usize {
+        self.jobs.map_or(num_cpus::get_physical(), NonZeroUsize::get)
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     Generate(GenerateArgs),

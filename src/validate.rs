@@ -1,20 +1,20 @@
 use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
-use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
 use std::fs::File;
 use std::io::{self, Read, Seek};
-use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::thread;
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{Progress, log_metrics, read_exact_or_eof, read_file_size, receive_progress};
+use crate::{
+    Layout, Progress, log_metrics, process_in_parallel, read_exact_or_eof, read_file_size,
+};
 
 /// Validate a random stream
 ///
@@ -53,7 +53,7 @@ pub fn validate(args: &ValidateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
         debug!("stream size: {stream_size}");
         debug!("chunk size: {chunk_size}");
 
-        validate_from_file(args, file, stream_size, chunk_size, &mut pb, &cancel)?
+        validate_from_file(args, file, stream_size, &mut pb, &cancel)?
     } else {
         let mut pb = Progress::new(None, args.common.no_progress)?;
 
@@ -106,85 +106,35 @@ fn validate_from_file(
     args: &ValidateArgs,
     file: &Path,
     stream_size: u64,
-    chunk_size: usize,
     pb: &mut Option<Progress>,
-    cancel: &Arc<AtomicBool>,
+    cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, u32)> {
-    let num_threads = args.common.jobs.map_or(num_cpus::get_physical(), NonZeroUsize::get);
-    debug!("number of threads: {num_threads}");
-
-    let num_chunks = stream_size.div_ceil(chunk_size as u64);
-    let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
-    let (tx, rx) = mpsc::channel::<u64>();
-
-    let handles: Vec<_> = (0..num_threads as u64)
-        .map(|i| {
-            let file = file.to_path_buf();
-            let tx = tx.clone();
-            let cancel = cancel.clone();
-            let position = args.position;
-            thread::spawn(move || -> anyhow::Result<_> {
-                let result = validate_chunk_range(
-                    &file,
-                    chunk_size,
-                    i,
-                    chunks_per_thread,
-                    num_chunks,
-                    stream_size,
-                    position,
-                    &tx,
-                    &cancel,
-                );
-                if result.is_err() {
-                    // tell the other threads to stop
-                    cancel.store(true, Ordering::Relaxed);
-                }
-                result
-            })
-        })
-        .collect();
-
-    receive_progress(pb, &rx, tx);
-    let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
-
-    let read_bytes = thread_data.iter().map(|(b, _)| b).sum();
-    let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
-    let mut hasher = thread_hashers[0].clone();
-    for partial_hasher in thread_hashers[1..].iter() {
-        hasher.combine(partial_hasher);
-    }
-
-    Ok((read_bytes, hasher.finalize()))
+    let layout =
+        Layout { position: args.position, stream_size, chunk_size: args.common.chunk_size };
+    process_in_parallel(layout.num_chunks(), args.common.num_threads(), pb, cancel, |chunks, tx| {
+        validate_chunk_range(file, &layout, chunks, tx, cancel)
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn validate_chunk_range(
     file: &Path,
-    chunk_size: usize,
-    thread_index: u64,
-    chunks_per_thread: u64,
-    num_chunks: u64,
-    stream_size: u64,
-    position: u64,
+    layout: &Layout,
+    chunks: Range<u64>,
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
     let mut file = File::open(file)?;
     let mut thread_hasher = Hasher::new();
-    let start_chunk = thread_index * chunks_per_thread;
-    let end_chunk = ((thread_index + 1) * chunks_per_thread).min(num_chunks);
-    let mut buffer = vec![0; chunk_size];
-    file.seek(io::SeekFrom::Start(position + start_chunk * chunk_size as u64))?;
+    let mut buffer = vec![0; layout.chunk_size as usize];
+    file.seek(io::SeekFrom::Start(layout.offset(chunks.start)))?;
     let mut total_read_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
-    for chunk in start_chunk..end_chunk {
-        let bytes_done = (chunk - start_chunk) * chunk_size as u64;
-        let remaining = (stream_size - start_chunk * chunk_size as u64 - bytes_done)
-            .min(chunk_size as u64) as usize;
-        let read_size = read_exact_or_eof(&mut file, &mut buffer[..remaining])?;
-        if read_size < remaining {
+    for chunk in chunks {
+        let expected = layout.chunk_len(chunk);
+        let read_size = read_exact_or_eof(&mut file, &mut buffer[..expected])?;
+        if read_size < expected {
             return Err(anyhow!(
-                "Unexpected end of stream at chunk {chunk}. Expected {remaining} bytes, found {read_size}."
+                "Unexpected end of stream at chunk {chunk}. Expected {expected} bytes, found {read_size}."
             ));
         }
         validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
@@ -195,7 +145,7 @@ fn validate_chunk_range(
             progress_bytes = 0;
         }
         if cancel.load(Ordering::Relaxed) {
-            return Ok((total_read_size, thread_hasher));
+            break;
         }
     }
     Ok((total_read_size, thread_hasher))

@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use clap::Args;
 use crc32fast::Hasher;
-use itertools::Itertools as _;
 use log::{debug, info};
 use parse_size::parse_size;
 use rand::Rng as _;
@@ -9,33 +8,14 @@ use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::fs::OpenOptions;
 use std::io::{self, Seek as _, Write};
-use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::thread;
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{Progress, log_metrics, read_file_size, receive_progress};
-
-/// Describes the logical random stream being generated
-#[derive(Clone, Debug)]
-struct StreamParams {
-    seed: u64,
-    position: u64,
-    stream_size: u64,
-    chunk_size: usize,
-    buffer_size: usize,
-}
-
-/// Describes the work slice assigned to one thread
-#[derive(Clone, Debug)]
-struct ThreadWork {
-    thread_index: u64,
-    chunks_per_thread: u64,
-    num_chunks: u64,
-}
+use crate::{Layout, Progress, log_metrics, process_in_parallel, read_file_size};
 
 /// Generate a random stream
 #[derive(Args, Debug)]
@@ -75,7 +55,7 @@ pub fn generate(args: &GenerateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
     debug!("seed: {}", args.seed);
 
     let (bytes_generated, checksum) = if let Some(file) = &args.file {
-        generate_to_file(args, file, stream_size, chunk_size, buffer_size, &mut pb, &cancel)?
+        generate_to_file(args, file, stream_size, buffer_size, &mut pb, &cancel)?
     } else {
         generate_to_stdout(args, stream_size, chunk_size, &mut pb, &cancel)?
     };
@@ -118,12 +98,11 @@ fn resolve_stream_size(args: &GenerateArgs) -> anyhow::Result<u64> {
 
 fn generate_to_file(
     args: &GenerateArgs,
-    file: &PathBuf,
+    file: &Path,
     stream_size: u64,
-    chunk_size: usize,
     buffer_size: usize,
     pb: &mut Option<Progress>,
-    cancel: &Arc<AtomicBool>,
+    cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, u32)> {
     // make sure the output file exists, before opening it in the threads
     let f = OpenOptions::new().create(true).truncate(false).write(true).open(file)?;
@@ -135,76 +114,37 @@ fn generate_to_file(
         }
     }
 
-    let num_threads = args.common.jobs.map_or(num_cpus::get_physical(), NonZeroUsize::get);
-    debug!("number of threads: {num_threads}");
-    let num_chunks = stream_size.div_ceil(chunk_size as u64);
-    let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
-    let (tx, rx) = mpsc::channel::<u64>();
-
-    let stream = StreamParams {
-        seed: args.seed,
-        position: args.position,
-        stream_size,
-        chunk_size,
-        buffer_size,
-    };
-
-    let handles: Vec<_> = (0..num_threads as u64)
-        .map(|i| {
-            let file = file.clone();
-            let tx = tx.clone();
-            let cancel = cancel.clone();
-            let stream = stream.clone();
-            thread::spawn(move || -> anyhow::Result<_> {
-                let work = ThreadWork { thread_index: i, chunks_per_thread, num_chunks };
-                let result = write_chunk_range(&file, &stream, &work, &tx, &cancel);
-                if result.is_err() {
-                    // tell the other threads to stop
-                    cancel.store(true, Ordering::Relaxed);
-                }
-                result
-            })
-        })
-        .collect();
-
-    receive_progress(pb, &rx, tx);
-    let thread_data: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).try_collect()?;
-
-    let write_bytes = thread_data.iter().map(|(b, _)| b).sum();
-    let thread_hashers: Vec<_> = thread_data.iter().map(|(_, h)| h).collect();
-    let mut hasher = thread_hashers[0].clone();
-    for partial_hasher in thread_hashers[1..].iter() {
-        hasher.combine(partial_hasher);
-    }
-
-    Ok((write_bytes, hasher.finalize()))
+    let layout =
+        Layout { position: args.position, stream_size, chunk_size: args.common.chunk_size };
+    process_in_parallel(layout.num_chunks(), args.common.num_threads(), pb, cancel, |chunks, tx| {
+        write_chunk_range(file, &layout, args.seed, buffer_size, chunks, tx, cancel)
+    })
 }
 
 fn write_chunk_range(
-    file: &PathBuf,
-    stream: &StreamParams,
-    work: &ThreadWork,
+    file: &Path,
+    layout: &Layout,
+    seed: u64,
+    buffer_size: usize,
+    chunks: Range<u64>,
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
     let mut writer = OpenOptions::new().write(true).open(file)?;
     let mut thread_hasher = Hasher::new();
     let mut local_hasher = Hasher::new();
-    let mut rng = Pcg64Mcg::seed_from_u64(stream.seed);
-    let mut buffer = vec![0; stream.buffer_size];
-    let start_chunk = work.thread_index * work.chunks_per_thread;
-    let end_chunk = ((work.thread_index + 1) * work.chunks_per_thread).min(work.num_chunks);
-    writer.seek(io::SeekFrom::Start(stream.position + start_chunk * stream.chunk_size as u64))?;
-    let advance_amount = start_chunk
-        .checked_mul(stream.buffer_size as u64)
-        .ok_or_else(|| anyhow!("arithmetic overflow: start_chunk * buffer_size exceeds u64 max"))?
-        / 8;
+    let mut rng = Pcg64Mcg::seed_from_u64(seed);
+    let mut buffer = vec![0; buffer_size];
+    writer.seek(io::SeekFrom::Start(layout.offset(chunks.start)))?;
+    let advance_amount =
+        chunks.start.checked_mul(buffer_size as u64).ok_or_else(|| {
+            anyhow!("arithmetic overflow: start_chunk * buffer_size exceeds u64 max")
+        })? / 8;
     rng.advance(advance_amount.into());
     let mut total_write_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
-    for chunk in start_chunk..end_chunk {
-        let write_size = (stream.stream_size - chunk * stream.chunk_size as u64)
-            .min(stream.chunk_size as u64) as usize;
+    for chunk in chunks {
+        let write_size = layout.chunk_len(chunk);
         generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         total_write_size += write_size as u64;
@@ -214,7 +154,7 @@ fn write_chunk_range(
             progress_bytes = 0;
         }
         if cancel.load(Ordering::Relaxed) {
-            return Ok((total_write_size, thread_hasher));
+            break;
         }
     }
     Ok((total_write_size, thread_hasher))
