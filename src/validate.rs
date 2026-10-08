@@ -175,6 +175,11 @@ fn validate_chunk_range(
         let remaining = (stream_size - start_chunk * chunk_size as u64 - bytes_done)
             .min(chunk_size as u64) as usize;
         let read_size = read_exact_or_eof(&mut file, &mut buffer[..remaining])?;
+        if read_size < remaining {
+            return Err(anyhow!(
+                "Unexpected end of stream at chunk {chunk}. Expected {remaining} bytes, found {read_size}."
+            ));
+        }
         validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
         total_read_size += read_size as u64;
         progress_bytes += read_size as u64;
@@ -205,6 +210,11 @@ fn validate_from_stdin(
         let read_size = read_exact_or_eof(&mut io::stdin(), &mut buffer)?;
         if read_size == 0 {
             // End of input stream (EOF)
+            if let Some(size) = args.common.size {
+                return Err(anyhow!(
+                    "Unexpected end of stream at chunk {chunk}. Expected {size} bytes, found {stream_size}."
+                ));
+            }
             break;
         }
         validate_chunk(chunk, &buffer[..read_size], &mut hasher)?;

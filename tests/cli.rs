@@ -265,3 +265,16 @@ fn interrupt() {
     let status = child.wait_with_output().unwrap().status;
     assert_eq!(status.code(), Some(130));
 }
+
+#[test]
+fn validate_detects_stream_shorter_than_size() {
+    let dir = TempDir::new().unwrap();
+    let d = dir.path();
+    randstream(d, &["generate", "-s", "32Ki", "out.bin"], None).success();
+    let data = fs::read(d.join("out.bin")).unwrap();
+    let message = "Unexpected end of stream at chunk 1";
+    for jobs in ["1", "2"] {
+        randstream(d, &["validate", "-s", "64Ki", "-j", jobs, "out.bin"], None).failure(1, message);
+    }
+    randstream(d, &["validate", "-s", "64Ki"], Some(&data)).failure(1, message);
+}
