@@ -7,15 +7,15 @@ use rand::Rng as _;
 use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::fs::OpenOptions;
-use std::io::{self, Seek as _, Write};
+use std::io::{self, IsTerminal as _, Seek as _, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
-use crate::{Layout, Progress, log_metrics, process_in_parallel, read_file_size};
+use crate::{Layout, Progress, ThreadProgress, log_metrics, process_in_parallel, read_file_size};
 
 /// Generate a random stream
 #[derive(Args, Debug)]
@@ -47,6 +47,11 @@ pub fn generate(args: &GenerateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
     // we need to write a multiple a 64 bits to be able to use advance()
     let buffer_size = chunk_size.div_ceil(8) * 8;
     let stream_size = resolve_stream_size(args)?;
+    if args.file.is_none() && io::stdout().is_terminal() {
+        return Err(anyhow!(
+            "Refusing to write binary data to a terminal. Redirect the output or give an output file."
+        ));
+    }
     let mut pb = Progress::new(Some(stream_size), args.common.no_progress)?;
 
     debug!("position: {}", args.position);
@@ -121,7 +126,9 @@ fn generate_to_file(
         args.common.num_threads(),
         pb,
         cancel,
-        |chunks, tx| write_chunk_range(file, &layout, args.seed, buffer_size, chunks, tx, cancel),
+        |chunks, progress| {
+            write_chunk_range(file, &layout, args.seed, buffer_size, chunks, progress, cancel)
+        },
     )?;
 
     // make sure the data reached the device, and report the errors happening
@@ -141,7 +148,7 @@ fn write_chunk_range(
     seed: u64,
     buffer_size: usize,
     chunks: Range<u64>,
-    tx: &mpsc::Sender<u64>,
+    progress: &mut ThreadProgress,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
     let mut writer = OpenOptions::new().write(true).open(file)?;
@@ -156,17 +163,12 @@ fn write_chunk_range(
         })? / 8;
     rng.advance(advance_amount.into());
     let mut total_write_size: u64 = 0;
-    let mut progress_bytes: u64 = 0;
     for chunk in chunks {
         let write_size = layout.chunk_len(chunk);
         generate_chunk(&mut rng, &mut buffer, write_size, &mut thread_hasher, &mut local_hasher);
         writer.write_all(&buffer[..write_size])?;
         total_write_size += write_size as u64;
-        progress_bytes += write_size as u64;
-        if chunk % 100 == 0 {
-            tx.send(progress_bytes)?;
-            progress_bytes = 0;
-        }
+        progress.add(write_size);
         if cancel.load(Ordering::Relaxed) {
             break;
         }

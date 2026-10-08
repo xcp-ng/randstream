@@ -7,13 +7,14 @@ use std::fs::File;
 use std::io::{self, Read, Seek};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use crate::cli::CommonArgs;
 use crate::{
-    Layout, Progress, log_metrics, process_in_parallel, read_exact_or_eof, read_file_size,
+    Layout, Progress, ThreadProgress, log_metrics, process_in_parallel, read_exact_or_eof,
+    read_file_size,
 };
 
 /// Validate a random stream
@@ -111,16 +112,20 @@ fn validate_from_file(
 ) -> anyhow::Result<(u64, u32)> {
     let layout =
         Layout { position: args.position, stream_size, chunk_size: args.common.chunk_size };
-    process_in_parallel(layout.num_chunks(), args.common.num_threads(), pb, cancel, |chunks, tx| {
-        validate_chunk_range(file, &layout, chunks, tx, cancel)
-    })
+    process_in_parallel(
+        layout.num_chunks(),
+        args.common.num_threads(),
+        pb,
+        cancel,
+        |chunks, progress| validate_chunk_range(file, &layout, chunks, progress, cancel),
+    )
 }
 
 fn validate_chunk_range(
     file: &Path,
     layout: &Layout,
     chunks: Range<u64>,
-    tx: &mpsc::Sender<u64>,
+    progress: &mut ThreadProgress,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
     let mut file = File::open(file)?;
@@ -128,7 +133,6 @@ fn validate_chunk_range(
     let mut buffer = vec![0; layout.chunk_size as usize];
     file.seek(io::SeekFrom::Start(layout.offset(chunks.start)))?;
     let mut total_read_size: u64 = 0;
-    let mut progress_bytes: u64 = 0;
     for chunk in chunks {
         let expected = layout.chunk_len(chunk);
         let read_size = read_exact_or_eof(&mut file, &mut buffer[..expected])?;
@@ -139,11 +143,7 @@ fn validate_chunk_range(
         }
         validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
         total_read_size += read_size as u64;
-        progress_bytes += read_size as u64;
-        if chunk % 100 == 0 {
-            tx.send(progress_bytes)?;
-            progress_bytes = 0;
-        }
+        progress.add(read_size);
         if cancel.load(Ordering::Relaxed) {
             break;
         }

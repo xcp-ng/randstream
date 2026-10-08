@@ -163,7 +163,7 @@ fn set_up_progress_bar(stream_size: Option<u64>) -> anyhow::Result<ProgressBar> 
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
         )?
-        .progress_chars(if supports_unicode::on(supports_unicode::Stream::Stdout) {
+        .progress_chars(if supports_unicode::on(supports_unicode::Stream::Stderr) {
             "█▉▊▋▌▍▎▏  "
         } else {
             "=> "
@@ -199,14 +199,14 @@ impl Layout {
 /// Process the chunks in parallel, each thread working on a contiguous range
 /// of chunks, and return the number of bytes processed and the stream checksum
 ///
-/// `work` processes a range of chunks, sends its progress in bytes, and returns
+/// `work` processes a range of chunks, reports its progress, and returns
 /// the number of bytes processed and the checksum of the range.
 pub fn process_in_parallel(
     num_chunks: u64,
     num_threads: usize,
     pb: &mut Option<Progress>,
     cancel: &AtomicBool,
-    work: impl Fn(Range<u64>, &Sender<u64>) -> anyhow::Result<(u64, Hasher)> + Sync,
+    work: impl Fn(Range<u64>, &mut ThreadProgress) -> anyhow::Result<(u64, Hasher)> + Sync,
 ) -> anyhow::Result<(u64, u32)> {
     debug!("number of threads: {num_threads}");
     let chunks_per_thread = num_chunks.div_ceil(num_threads as u64);
@@ -214,12 +214,12 @@ pub fn process_in_parallel(
     thread::scope(|s| {
         let handles: Vec<_> = (0..num_threads as u64)
             .map(|i| {
-                let tx = tx.clone();
+                let mut progress = ThreadProgress { tx: tx.clone(), bytes: 0, chunks: 0 };
                 let work = &work;
                 let chunks = (i * chunks_per_thread).min(num_chunks)
                     ..((i + 1) * chunks_per_thread).min(num_chunks);
                 s.spawn(move || {
-                    let result = work(chunks, &tx);
+                    let result = work(chunks, &mut progress);
                     if result.is_err() {
                         // tell the other threads to stop
                         cancel.store(true, Ordering::Relaxed);
@@ -243,6 +243,38 @@ pub fn process_in_parallel(
             .unwrap_or_default();
         Ok((bytes, hasher.finalize()))
     })
+}
+
+/// The progress of a thread, sent in batches to limit the overhead
+pub struct ThreadProgress {
+    tx: Sender<u64>,
+    bytes: u64,
+    chunks: u64,
+}
+
+impl ThreadProgress {
+    /// Report a processed chunk of `bytes` bytes
+    pub fn add(&mut self, bytes: usize) {
+        self.bytes += bytes as u64;
+        self.chunks += 1;
+        if self.chunks.is_multiple_of(100) {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.bytes > 0 {
+            // the receiver outlives the threads, so this can't fail
+            let _ = self.tx.send(self.bytes);
+            self.bytes = 0;
+        }
+    }
+}
+
+impl Drop for ThreadProgress {
+    fn drop(&mut self) {
+        self.flush();
+    }
 }
 
 fn receive_progress(pb: &mut Option<Progress>, rx: &Receiver<u64>, tx: Sender<u64>) {
