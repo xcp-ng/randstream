@@ -86,8 +86,14 @@ pub fn validate(args: &ValidateArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<
 }
 
 fn resolve_stream_size(args: &ValidateArgs, file: &Path) -> anyhow::Result<u64> {
-    if let Some(size) = &args.common.size {
-        return Ok(*size);
+    if let Some(size) = args.common.size {
+        if args.position.checked_add(size).is_none() {
+            return Err(anyhow!(
+                "The position {} plus the size {size} is too large",
+                args.position
+            ));
+        }
+        return Ok(size);
     }
     let size = read_file_size(file)?;
     if args.position > size {

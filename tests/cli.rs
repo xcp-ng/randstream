@@ -334,6 +334,8 @@ fn errors() {
         (&["generate", "-p", "64Ki", "small.bin"], 1, "greater than the file size"),
         (&["validate", "-p", "64Ki", "small.bin"], 1, "greater than the file size"),
         (&["validate", "missing.bin"], 1, "No such file or directory"),
+        (&["generate", "-s", "18446744073709551615", "-p", "1", "out.bin"], 1, "is too large"),
+        (&["validate", "-s", "18446744073709551615", "-p", "1", "small.bin"], 1, "is too large"),
     ];
     for (args, code, message) in cases {
         randstream(d, args, None).failure(*code, message);
