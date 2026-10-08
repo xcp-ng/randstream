@@ -6,8 +6,9 @@ cases such as verifying storage integrity, benchmarking I/O performance, or
 generating large, arbitrary datasets for testing.
 
 The utility uses a **seed** to ensure that the generated data is reproducible.
-In order to be validatable without regeneration on the data, the stream is processed in chunks (32KB by default), and each chunk includes
-a **checksum** of 4 bytes at its end for integrity verification.
+In order to be validatable without regenerating the data, the stream is
+processed in chunks (32 KiB by default), and each chunk includes a
+**checksum** of 4 bytes at its end for integrity verification.
 It also uses **parallel processing** to ensure maximum throughput on modern
 hardware, while keeping the output identical independently of the number of
 parallel tasks.
@@ -19,14 +20,14 @@ Download the archive for your platform from the [releases page](./releases).
 Or install the binary with `cargo-binstall`:
 
 ```bash
-cargo binstall ranstream
+cargo binstall randstream
 ```
 
 Or install from source:
 
 ```bash
 cargo install randstream
-````
+```
 
 ## Usage
 
@@ -39,9 +40,13 @@ Use the generate command to create a reproducible stream of pseudo-random data.
 ### Validating a Random Stream (`validate`)
 
 Use the `validate` command to verify that an existing stream has not been
-corrupted or altered. The validation process will **re-generate** the data
-internally using the same seed and compare it byte-for-byte with the input
-stream.
+corrupted or altered. The validation process checks the **checksum** of each
+chunk, so it doesn't need the seed, and reports the chunk where the stream is
+corrupted.
+
+Both commands print a **global checksum** of the stream. Pass the one printed
+by `generate` to `validate --expected-checksum` to also make sure that the
+chunks are the expected ones, in the expected order.
 
 ### Examples
 
@@ -61,4 +66,10 @@ randstream generate --size 100G --seed 12345678 --jobs 2 output.bin
 
 ```bash
 randstream validate output.bin
+```
+
+**Validate it against the checksum printed by `generate`:**
+
+```bash
+randstream validate --expected-checksum 3e6bd002 output.bin
 ```
