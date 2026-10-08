@@ -1,7 +1,7 @@
 use std::fs;
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -9,22 +9,34 @@ use tempfile::TempDir;
 const KI: usize = 1024;
 
 struct Run {
+    context: String,
     code: Option<i32>,
     stdout: Vec<u8>,
     stderr: String,
 }
 
 impl Run {
+    /// Describe the run in the assertion messages
+    fn context(mut self, context: &str) -> Self {
+        self.context = format!("{context}: {}", self.context);
+        self
+    }
+
     #[track_caller]
     fn success(self) -> Self {
-        assert_eq!(self.code, Some(0), "stderr:\n{}", self.stderr);
+        assert_eq!(self.code, Some(0), "{}\nstderr:\n{}", self.context, self.stderr);
         self
     }
 
     #[track_caller]
     fn failure(self, code: i32, message: &str) -> Self {
-        assert_eq!(self.code, Some(code), "stderr:\n{}", self.stderr);
-        assert!(self.stderr.contains(message), "expected {message:?} in stderr:\n{}", self.stderr);
+        assert_eq!(self.code, Some(code), "{}\nstderr:\n{}", self.context, self.stderr);
+        assert!(
+            self.stderr.contains(message),
+            "{}\nexpected {message:?} in stderr:\n{}",
+            self.context,
+            self.stderr
+        );
         self
     }
 
@@ -58,6 +70,7 @@ fn randstream(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Run {
     }
     let out = child.wait_with_output().unwrap();
     Run {
+        context: format!("randstream {}", args.join(" ")),
         code: out.status.code(),
         stdout: out.stdout,
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -68,6 +81,55 @@ fn randstream(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Run {
 fn reference(args: &[&str]) -> Vec<u8> {
     let tmp = TempDir::new().unwrap();
     randstream(tmp.path(), &[&["generate"], args].concat(), None).success().stdout
+}
+
+/// A long running randstream, killed when dropped so that a failing test
+/// doesn't leave it running
+struct Running {
+    child: Child,
+    // kept open so that the process can keep logging
+    _stderr: BufReader<ChildStderr>,
+}
+
+impl Running {
+    /// Spawn randstream in `dir` and wait until it has installed its SIGINT handler
+    fn spawn(dir: &Path, args: &[&str], stdin: Stdio, stdout: Stdio) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_randstream"))
+            .current_dir(dir)
+            .arg("-v")
+            .args(args)
+            .stdin(stdin)
+            .stdout(stdout)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // the debug logs start once the handler is installed
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut line = String::new();
+        stderr.read_line(&mut line).unwrap();
+        assert!(line.starts_with("debug:"), "unexpected output: {line}");
+        Running { child, _stderr: stderr }
+    }
+
+    /// Send SIGINT and return the exit code, or None if still running after 10s
+    fn interrupt(&mut self) -> Option<i32> {
+        Command::new("kill").args(["-INT", &self.child.id().to_string()]).status().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status.code();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// The stream format is stable: pinned checksums, identical bytes whatever the
@@ -150,13 +212,13 @@ fn truncation() {
         [(128, false, 32), (128, true, 128), (16, true, 32), (16, false, 32)]
     {
         fs::write(&path, vec![0u8; initial * KI]).unwrap();
-        let flag = if no_truncate { "--no-truncate" } else { "--seed=0" };
-        randstream(d, &["generate", "-s", "32Ki", flag, "out.bin"], None).success();
-        assert_eq!(
-            fs::metadata(&path).unwrap().len() as usize,
-            expected * KI,
-            "{initial}Ki {flag}"
-        );
+        let mut args = vec!["generate", "-s", "32Ki", "out.bin"];
+        if no_truncate {
+            args.push("--no-truncate");
+        }
+        randstream(d, &args, None).success();
+        let size = fs::metadata(&path).unwrap().len() as usize;
+        assert_eq!(size, expected * KI, "{initial}Ki file, {args:?}");
     }
 }
 
@@ -210,11 +272,25 @@ fn validate_detects_corruption() {
         let d = dir.path();
         fs::write(d.join("out.bin"), &data).unwrap();
         for jobs in ["1", "3"] {
-            randstream(d, &["validate", "-j", jobs, "out.bin"], None).failure(1, message);
+            randstream(d, &["validate", "-j", jobs, "out.bin"], None)
+                .context(what)
+                .failure(1, message);
         }
-        randstream(d, &["validate"], Some(&data)).failure(1, message);
-        eprintln!("ok: {what}");
+        randstream(d, &["validate"], Some(&data)).context(what).failure(1, message);
     }
+}
+
+#[test]
+fn validate_detects_stream_shorter_than_size() {
+    let dir = TempDir::new().unwrap();
+    let d = dir.path();
+    randstream(d, &["generate", "-s", "32Ki", "out.bin"], None).success();
+    let data = fs::read(d.join("out.bin")).unwrap();
+    let message = "Unexpected end of stream at chunk 1";
+    for jobs in ["1", "2"] {
+        randstream(d, &["validate", "-s", "64Ki", "-j", jobs, "out.bin"], None).failure(1, message);
+    }
+    randstream(d, &["validate", "-s", "64Ki"], Some(&data)).failure(1, message);
 }
 
 #[test]
@@ -257,51 +333,19 @@ fn errors() {
 #[test]
 fn interrupt() {
     let dir = TempDir::new().unwrap();
-    let spawn = |args: &[&str], stdin: Stdio, stdout: Stdio| {
-        Command::new(env!("CARGO_BIN_EXE_randstream"))
-            .current_dir(dir.path())
-            .args(args)
-            .stdin(stdin)
-            .stdout(stdout)
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
-    };
-    let mut source = spawn(&["generate", "-s", "100G"], Stdio::null(), Stdio::piped());
-    let children = [
+    let d = dir.path();
+    let null = Stdio::null;
+    let mut source = Running::spawn(d, &["generate", "-s", "100G"], null(), Stdio::piped());
+    let source_stdout = source.child.stdout.take().unwrap();
+    let cases = [
         (
             "generate to file",
-            spawn(&["generate", "-s", "100G", "out.bin"], Stdio::null(), Stdio::null()),
+            Running::spawn(d, &["generate", "-s", "100G", "out.bin"], null(), null()),
         ),
-        ("generate to stdout", spawn(&["generate", "-s", "100G"], Stdio::null(), Stdio::null())),
-        (
-            "validate from stdin",
-            spawn(&["validate"], source.stdout.take().unwrap().into(), Stdio::null()),
-        ),
+        ("generate to stdout", Running::spawn(d, &["generate", "-s", "100G"], null(), null())),
+        ("validate from stdin", Running::spawn(d, &["validate"], source_stdout.into(), null())),
     ];
-    std::thread::sleep(Duration::from_millis(500));
-    for (what, mut child) in children {
-        Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let _ = child.kill();
-        assert_eq!(child.wait().unwrap().code(), Some(130), "{what}");
+    for (what, mut child) in cases {
+        assert_eq!(child.interrupt(), Some(130), "{what}");
     }
-    source.kill().unwrap();
-    source.wait().unwrap();
-}
-
-#[test]
-fn validate_detects_stream_shorter_than_size() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    randstream(d, &["generate", "-s", "32Ki", "out.bin"], None).success();
-    let data = fs::read(d.join("out.bin")).unwrap();
-    let message = "Unexpected end of stream at chunk 1";
-    for jobs in ["1", "2"] {
-        randstream(d, &["validate", "-s", "64Ki", "-j", jobs, "out.bin"], None).failure(1, message);
-    }
-    randstream(d, &["validate", "-s", "64Ki"], Some(&data)).failure(1, message);
 }
