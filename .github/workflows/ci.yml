@@ -100,11 +100,19 @@ jobs:
     - run: rustup install stable --component clippy
     - run: cargo clippy --all-targets -- -D warnings
 
-  dependabot-auto-merge:
+  ci-ok:
+    if: always()
     needs:
       - test
       - rustfmt
       - clippy
+    runs-on: ubuntu-24.04
+    steps:
+    - if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      run: exit 1
+
+  dependabot-auto-merge:
+    needs: ci-ok
     permissions:
       contents: write
       pull-requests: write
