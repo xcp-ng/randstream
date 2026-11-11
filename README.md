@@ -83,6 +83,21 @@ rather than cached data. `O_DIRECT` requires block-aligned I/O, so:
 
 The option is ignored when reading from stdin or writing to stdout.
 
+### I/O size (`--io-size`)
+
+Each thread reads or writes several consecutive chunks at once: `--io-size`
+(`-i`, 1 MiB by default) rounded down to a multiple of the chunk size, one chunk
+at least. A thread waits for each of its I/Os, so the I/O size and the number of
+jobs set how much work the device has in flight: with small I/Os, a device with
+a high latency (e.g. a virtual disk) stays mostly idle. The I/O size doesn't
+change the stream, nor the validation, which is still done chunk by chunk.
+
+With the default I/O size, a 32 KiB chunk size gives I/Os of 32 chunks, a 4 KiB
+one I/Os of 256 chunks, and a chunk size of 1 MiB or more one chunk per I/O.
+With `stress`, an I/O doesn't cross a range: `--range-size` limits it too.
+
+The option is ignored when reading from stdin or writing to stdout.
+
 ### Examples
 
 **Fill a whole block device:**

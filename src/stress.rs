@@ -239,6 +239,7 @@ pub fn stress(args: &StressArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<i32>
 
     let position = args.position;
     let direct = args.common.direct;
+    let io_chunks = args.common.io_chunks();
     let scheduler = Arc::new(Scheduler::new(num_ranges as usize, seed));
     // write_chunk_range()/validate_chunk_range() report progress through this
     // channel. A drain thread keeps it emptied, sums the bytes processed, and
@@ -253,8 +254,15 @@ pub fn stress(args: &StressArgs, cancel: Arc<AtomicBool>) -> anyhow::Result<i32>
             let scheduler = scheduler.clone();
             let cancel = cancel.clone();
             let tx = tx.clone();
-            let stream =
-                StreamParams { seed: 0, position, stream_size, chunk_size, buffer_size, direct };
+            let stream = StreamParams {
+                seed: 0,
+                position,
+                stream_size,
+                chunk_size,
+                buffer_size,
+                io_chunks,
+                direct,
+            };
             thread::spawn(move || {
                 let ctx = WorkerCtx {
                     file: &file,
@@ -358,7 +366,7 @@ fn worker(ctx: &WorkerCtx) -> anyhow::Result<()> {
     // Allocations reused across every job this worker handles.
     let mut buffer = AVec::<u8, RuntimeAlign>::from_iter(
         DIRECT_ALIGN,
-        std::iter::repeat_n(0u8, ctx.stream.buffer_size),
+        std::iter::repeat_n(0u8, ctx.stream.io_buffer_size()),
     );
     while !ctx.cancel.load(Ordering::Relaxed) {
         let Some(job) = ctx.scheduler.claim(&mut rng) else {
@@ -399,7 +407,8 @@ fn worker(ctx: &WorkerCtx) -> anyhow::Result<()> {
                 ctx.stream.stream_size,
                 ctx.stream.position,
                 ctx.stream.direct,
-                buffer.as_mut_slice(),
+                // without the padding of the last chunk, only for generation
+                &mut buffer[..ctx.stream.io_chunks * ctx.stream.chunk_size],
                 ctx.tx,
                 ctx.cancel,
             )

@@ -130,11 +130,12 @@ fn validate_from_file(
             let cancel = cancel.clone();
             let position = args.position;
             let direct = args.common.direct;
+            let io_chunks = args.common.io_chunks();
             thread::spawn(move || -> anyhow::Result<_> {
-                // One aligned buffer per thread, reused for every chunk.
+                // One aligned buffer per thread, reused for every I/O.
                 let mut buffer = AVec::<u8, RuntimeAlign>::from_iter(
                     DIRECT_ALIGN,
-                    std::iter::repeat_n(0u8, chunk_size),
+                    std::iter::repeat_n(0u8, io_chunks * chunk_size),
                 );
                 let result = validate_chunk_range(
                     &file,
@@ -171,6 +172,8 @@ fn validate_from_file(
     Ok((read_bytes, hasher.finalize()))
 }
 
+/// Read and validate the thread's/range's chunks with reads of `buffer.len()`
+/// bytes, a multiple of `chunk_size`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_chunk_range(
     file: &Path,
@@ -185,7 +188,8 @@ pub(crate) fn validate_chunk_range(
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    debug_assert!(buffer.len() >= chunk_size);
+    debug_assert!(buffer.len() >= chunk_size && buffer.len().is_multiple_of(chunk_size));
+    let io_chunks = buffer.len() / chunk_size;
     let mut options = OpenOptions::new();
     options.read(true);
     if direct {
@@ -198,17 +202,22 @@ pub(crate) fn validate_chunk_range(
     file.seek(io::SeekFrom::Start(position + start_chunk * chunk_size as u64))?;
     let mut total_read_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
-    for chunk in start_chunk..end_chunk {
-        let bytes_done = (chunk - start_chunk) * chunk_size as u64;
-        let remaining = (stream_size - start_chunk * chunk_size as u64 - bytes_done)
-            .min(chunk_size as u64) as usize;
+    let mut chunks_since_progress: u64 = 0;
+    for first_chunk in (start_chunk..end_chunk).step_by(io_chunks) {
+        let last_chunk = (first_chunk + io_chunks as u64).min(end_chunk);
+        let remaining = (stream_size - first_chunk * chunk_size as u64)
+            .min((last_chunk - first_chunk) * chunk_size as u64) as usize;
         let read_size = read_exact_or_eof(&mut file, &mut buffer[..remaining])?;
-        validate_chunk(chunk, &buffer[..read_size], &mut thread_hasher)?;
+        for (chunk, data) in (first_chunk..).zip(buffer[..read_size].chunks(chunk_size)) {
+            validate_chunk(chunk, data, &mut thread_hasher)?;
+        }
         total_read_size += read_size as u64;
         progress_bytes += read_size as u64;
-        if chunk % 100 == 0 {
+        chunks_since_progress += last_chunk - first_chunk;
+        if chunks_since_progress >= 100 {
             tx.send(progress_bytes)?;
             progress_bytes = 0;
+            chunks_since_progress = 0;
         }
         if cancel.load(Ordering::Relaxed) {
             if progress_bytes > 0 {
@@ -217,7 +226,7 @@ pub(crate) fn validate_chunk_range(
             return Ok((total_read_size, thread_hasher));
         }
     }
-    // Flush the bytes accumulated since the last `% 100` checkpoint. Ranges
+    // Flush the bytes accumulated since the last checkpoint (every 100 chunks). Ranges
     // shorter than the sampling stride (e.g. `stress`'s small ranges) would
     // otherwise report little or no progress at all.
     if progress_bytes > 0 {

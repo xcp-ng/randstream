@@ -51,6 +51,15 @@ pub struct CommonArgs {
     #[clap(short, long, default_value = "32ki", value_parser=|s: &str| parse_size(s))]
     pub chunk_size: u64,
 
+    /// The size of each read or write
+    ///
+    /// Several consecutive chunks are read or written at once: each thread
+    /// waits for its I/O, so on a device with a high latency (e.g. a virtual
+    /// disk) small I/Os leave it mostly idle. Rounded down to a multiple of
+    /// the chunk size (one chunk at least). The stream doesn't depend on it.
+    #[clap(short, long, default_value = "1Mi", value_parser=|s: &str| parse_size(s))]
+    pub io_size: u64,
+
     /// Hide the progress bar
     #[clap(short = 'P', long)]
     pub no_progress: bool,
@@ -61,6 +70,13 @@ pub struct CommonArgs {
     /// of 4096. Ignored when reading from stdin or writing to stdout.
     #[clap(short = 'D', long)]
     pub direct: bool,
+}
+
+impl CommonArgs {
+    /// The number of chunks read or written at once
+    pub fn io_chunks(&self) -> usize {
+        (self.io_size / self.chunk_size).max(1) as usize
+    }
 }
 
 #[derive(Subcommand, Debug)]

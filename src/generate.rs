@@ -31,7 +31,17 @@ pub(crate) struct StreamParams {
     pub(crate) stream_size: u64,
     pub(crate) chunk_size: usize,
     pub(crate) buffer_size: usize,
+    /// The number of chunks written at once
+    pub(crate) io_chunks: usize,
     pub(crate) direct: bool,
+}
+
+impl StreamParams {
+    /// The size of the buffer of [`write_chunk_range`]: `io_chunks` chunks,
+    /// plus the padding of the last one to `buffer_size`.
+    pub(crate) fn io_buffer_size(&self) -> usize {
+        self.io_chunks * self.chunk_size + self.buffer_size - self.chunk_size
+    }
 }
 
 /// Describes the work slice assigned to one thread
@@ -150,6 +160,7 @@ fn generate_to_file(
         stream_size,
         chunk_size,
         buffer_size,
+        io_chunks: args.common.io_chunks(),
         direct: args.common.direct,
     };
 
@@ -160,10 +171,10 @@ fn generate_to_file(
             let cancel = cancel.clone();
             let stream = stream.clone();
             thread::spawn(move || -> anyhow::Result<_> {
-                // One aligned buffer per thread, reused for every chunk.
+                // One aligned buffer per thread, reused for every I/O.
                 let mut buffer = AVec::<u8, RuntimeAlign>::from_iter(
                     DIRECT_ALIGN,
-                    std::iter::repeat_n(0u8, stream.buffer_size),
+                    std::iter::repeat_n(0u8, stream.io_buffer_size()),
                 );
                 let work = ThreadWork { thread_index: i, chunks_per_thread, num_chunks };
                 let result =
@@ -190,8 +201,9 @@ fn generate_to_file(
     Ok((write_bytes, hasher.finalize(), peak_rate))
 }
 
-/// Generate the thread's/range's chunks into `buffer`, which must be exactly
-/// `stream.buffer_size` long and is reused across chunks (and, in `stress`,
+/// Generate the thread's/range's chunks into `buffer`, `stream.io_chunks` at a
+/// time, and write them with one write each time. `buffer` must be exactly
+/// `stream.io_buffer_size()` long and is reused across I/Os (and, in `stress`,
 /// across jobs) so no allocation happens here.
 pub(crate) fn write_chunk_range(
     file: &Path,
@@ -201,7 +213,7 @@ pub(crate) fn write_chunk_range(
     tx: &mpsc::Sender<u64>,
     cancel: &AtomicBool,
 ) -> anyhow::Result<(u64, Hasher)> {
-    debug_assert_eq!(buffer.len(), stream.buffer_size);
+    debug_assert_eq!(buffer.len(), stream.io_buffer_size());
     let mut options = OpenOptions::new();
     options.write(true);
     if stream.direct {
@@ -221,16 +233,33 @@ pub(crate) fn write_chunk_range(
     rng.advance(advance_amount.into());
     let mut total_write_size: u64 = 0;
     let mut progress_bytes: u64 = 0;
-    for chunk in start_chunk..end_chunk {
-        let write_size = (stream.stream_size - chunk * stream.chunk_size as u64)
-            .min(stream.chunk_size as u64) as usize;
-        generate_chunk(&mut rng, buffer, write_size, &mut thread_hasher, &mut local_hasher);
-        writer.write_all(&buffer[..write_size])?;
-        total_write_size += write_size as u64;
-        progress_bytes += write_size as u64;
-        if chunk % 100 == 0 {
+    let mut chunks_since_progress: u64 = 0;
+    for first_chunk in (start_chunk..end_chunk).step_by(stream.io_chunks) {
+        let last_chunk = (first_chunk + stream.io_chunks as u64).min(end_chunk);
+        // Each chunk is generated in its slot of the buffer. The random bytes
+        // of its padding to buffer_size spill over the start of the next slot,
+        // which the next chunk overwrites.
+        let mut io_size = 0;
+        for chunk in first_chunk..last_chunk {
+            let write_size = (stream.stream_size - chunk * stream.chunk_size as u64)
+                .min(stream.chunk_size as u64) as usize;
+            generate_chunk(
+                &mut rng,
+                &mut buffer[io_size..io_size + stream.buffer_size],
+                write_size,
+                &mut thread_hasher,
+                &mut local_hasher,
+            );
+            io_size += write_size;
+        }
+        writer.write_all(&buffer[..io_size])?;
+        total_write_size += io_size as u64;
+        progress_bytes += io_size as u64;
+        chunks_since_progress += last_chunk - first_chunk;
+        if chunks_since_progress >= 100 {
             tx.send(progress_bytes)?;
             progress_bytes = 0;
+            chunks_since_progress = 0;
         }
         if cancel.load(Ordering::Relaxed) {
             if progress_bytes > 0 {
@@ -239,7 +268,7 @@ pub(crate) fn write_chunk_range(
             return Ok((total_write_size, thread_hasher));
         }
     }
-    // Flush the bytes accumulated since the last `% 100` checkpoint. Ranges
+    // Flush the bytes accumulated since the last checkpoint (every 100 chunks). Ranges
     // shorter than the sampling stride (e.g. `stress`'s small ranges) would
     // otherwise report little or no progress at all.
     if progress_bytes > 0 {
