@@ -28,7 +28,7 @@ human-units = "0.6.0"
 indicatif = "0.18.4"
 itertools = "0.15.0"
 log = "0.4.29"
-nix = { version = "0.31.3", features = ["ioctl"] }
+nix = { version = "0.32.0", features = ["ioctl"] }
 num_cpus = "1.17.0"
 ocli = "0.3.0"
 parse-size = "1.1.0"
